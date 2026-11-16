@@ -6,6 +6,9 @@ on:
     branches: [ main ]
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -26,6 +29,9 @@ jobs:
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
 
+      - name: Accept Android SDK licenses
+        run: yes | sdkmanager --licenses
+
       - name: Install Android SDK components
         run: |
           sdkmanager "platform-tools" "platforms;android-34" "build-tools;34.0.0"
@@ -33,7 +39,7 @@ jobs:
       - name: Make gradlew executable
         run: chmod +x gradlew
 
-      - name: Build APK
+      - name: Build ChessOverlay APK
         run: ./gradlew assembleDebug --no-daemon --stacktrace
 
       - name: Upload APK
