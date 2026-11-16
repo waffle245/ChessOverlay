@@ -1,0 +1,2 @@
+#!/usr/bin/env sh
+CLASSPATH=$APP_HOME/gradle/wrapper/gradle-wrapper.jar exec gradle "$@"
