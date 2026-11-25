@@ -10,6 +10,7 @@ import android.media.projection.MediaProjectionManager
 import android.os.*
 import android.util.DisplayMetrics
 import android.view.*
+import android.widget.TextView
 import android.view.WindowManager.LayoutParams.*
 import androidx.core.app.NotificationCompat
 import kotlinx.coroutines.*
@@ -197,6 +198,8 @@ class OverlayService : Service() {
     private var vd: android.hardware.display.VirtualDisplay? = null
     private var ir: ImageReader? = null
     private val engine = Engine()
+    @Volatile private var engineEnabled = false
+    private lateinit var engineToggle: TextView
     private var lastFen = ""
     private var sw = 0; private var sh = 0; private var dpi = 0
 
@@ -215,6 +218,37 @@ class OverlayService : Service() {
                 WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
             PixelFormat.TRANSLUCENT
         ).apply { gravity = Gravity.TOP or Gravity.START })
+
+        // Separate touchable floating switch; the transparent arrow layer remains non-touchable.
+        engineToggle = TextView(this).apply {
+            text = "ENGINE: OFF"
+            textSize = 14f
+            setTextColor(Color.WHITE)
+            typeface = Typeface.DEFAULT_BOLD
+            gravity = Gravity.CENTER
+            setPadding(22, 12, 22, 12)
+            background = android.graphics.drawable.GradientDrawable().apply {
+                setColor(0xEE20283A.toInt())
+                cornerRadius = 28f
+                setStroke(2, 0xFF00C8FF.toInt())
+            }
+            setOnClickListener {
+                engineEnabled = !engineEnabled
+                text = if (engineEnabled) "ENGINE: ON" else "ENGINE: OFF"
+                if (!engineEnabled) arrow.clear()
+            }
+        }
+        wm.addView(engineToggle, WindowManager.LayoutParams(
+            WindowManager.LayoutParams.WRAP_CONTENT,
+            WindowManager.LayoutParams.WRAP_CONTENT,
+            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
+            PixelFormat.TRANSLUCENT
+        ).apply {
+            gravity = Gravity.TOP or Gravity.END
+            x = 24
+            y = 120
+        })
         startForeground(1, buildNotif())
         scope.launch { val sf = ensureSf(); if (sf != null) engine.start(sf) }
     }
@@ -243,6 +277,10 @@ class OverlayService : Service() {
         } finally { img.close() }
         val board = BoardFinder.find(bmp) ?: run { withContext(Dispatchers.Main) { arrow.clear() }; return }
         val flipped = BoardFinder.isFlipped(bmp,board)
+        if (!engineEnabled) {
+            withContext(Dispatchers.Main) { arrow.clear() }
+            return
+        }
         val fen = buildFen(bmp,board)
         if (fen == lastFen) return
         lastFen = fen
@@ -306,6 +344,7 @@ class OverlayService : Service() {
     override fun onDestroy() {
         scope.cancel(); vd?.release(); ir?.close(); mp?.stop()
         if (arrow.isAttachedToWindow) wm.removeView(arrow)
+        if (::engineToggle.isInitialized && engineToggle.isAttachedToWindow) wm.removeView(engineToggle)
         engine.stop(); super.onDestroy()
     }
     override fun onBind(i: Intent?) = null
