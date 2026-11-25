@@ -11,6 +11,9 @@ import android.os.*
 import android.util.DisplayMetrics
 import android.view.*
 import android.widget.TextView
+import android.widget.Button
+import android.widget.LinearLayout
+import android.widget.ScrollView
 import android.view.WindowManager.LayoutParams.*
 import androidx.core.app.NotificationCompat
 import kotlinx.coroutines.*
@@ -206,7 +209,14 @@ class OverlayService : Service() {
     private var ir: ImageReader? = null
     private val engine = Engine()
     @Volatile private var engineEnabled = false
-    private lateinit var engineToggle: TextView
+    @Volatile private var engineReady = false
+    @Volatile private var arrowsEnabled = true
+    @Volatile private var showEvaluation = true
+    @Volatile private var overlayVisible = true
+    @Volatile private var engineDepth = 15
+    private lateinit var launcher: TextView
+    private lateinit var panel: LinearLayout
+    private lateinit var panelStatus: TextView
     private var lastFen = ""
     private var sw = 0; private var sh = 0; private var dpi = 0
 
@@ -226,38 +236,79 @@ class OverlayService : Service() {
             PixelFormat.TRANSLUCENT
         ).apply { gravity = Gravity.TOP or Gravity.START })
 
-        // Separate touchable floating switch; the transparent arrow layer remains non-touchable.
-        engineToggle = TextView(this).apply {
-            text = "ENGINE: OFF"
-            textSize = 14f
+        // Compact floating launcher remains available when the full overlay is hidden.
+        launcher = TextView(this).apply {
+            text = "♟"
+            textSize = 22f
             setTextColor(Color.WHITE)
-            typeface = Typeface.DEFAULT_BOLD
             gravity = Gravity.CENTER
-            setPadding(22, 12, 22, 12)
+            setPadding(18, 10, 18, 10)
             background = android.graphics.drawable.GradientDrawable().apply {
-                setColor(0xEE20283A.toInt())
-                cornerRadius = 28f
+                setColor(0xEE20283A.toInt()); cornerRadius = 48f
                 setStroke(2, 0xFF00C8FF.toInt())
             }
-            setOnClickListener {
-                engineEnabled = !engineEnabled
-                text = if (engineEnabled) "ENGINE: ON" else "ENGINE: OFF"
-                if (!engineEnabled) arrow.clear()
-            }
+            setOnClickListener { togglePanel() }
         }
-        wm.addView(engineToggle, WindowManager.LayoutParams(
+        wm.addView(launcher, WindowManager.LayoutParams(
             WindowManager.LayoutParams.WRAP_CONTENT,
             WindowManager.LayoutParams.WRAP_CONTENT,
             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
             PixelFormat.TRANSLUCENT
-        ).apply {
-            gravity = Gravity.TOP or Gravity.END
-            x = 24
-            y = 120
-        })
+        ).apply { gravity = Gravity.TOP or Gravity.END; x = 20; y = 120 })
+
+        panel = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(18, 16, 18, 16)
+            background = android.graphics.drawable.GradientDrawable().apply {
+                setColor(0xF2222633.toInt()); cornerRadius = 24f
+                setStroke(2, 0xFF46536B.toInt())
+            }
+        }
+        val scroll = ScrollView(this).apply { addView(panel) }
+        addPanelLabel("CHESS OVERLAY")
+        panelStatus = addPanelLabel("Board: waiting for screen capture")
+        addPanelButton("ENGINE  •  OFF") {
+            engineEnabled = !engineEnabled
+            updatePanel()
+            if (!engineEnabled) arrow.clear()
+        }
+        addPanelButton("ARROWS  •  ON") {
+            arrowsEnabled = !arrowsEnabled
+            if (!arrowsEnabled) arrow.clear()
+            updatePanel()
+        }
+        addPanelButton("EVALUATION  •  ON") {
+            showEvaluation = !showEvaluation
+            updatePanel()
+        }
+        addPanelButton("ENGINE DEPTH  •  15") {
+            engineDepth = when (engineDepth) { 10 -> 15; 15 -> 18; else -> 10 }
+            updatePanel()
+        }
+        addPanelButton("HIDE FULL OVERLAY") {
+            overlayVisible = false
+            arrow.clear()
+            panel.visibility = View.GONE
+            launcher.text = "♟"
+            launcher.contentDescription = "Restore ChessOverlay"
+        }
+        addPanelButton("CLOSE MENU") { panel.visibility = View.GONE }
+        wm.addView(scroll, WindowManager.LayoutParams(
+            (sw * 0.72f).toInt().coerceAtMost(620),
+            WindowManager.LayoutParams.WRAP_CONTENT,
+            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+            PixelFormat.TRANSLUCENT
+        ).apply { gravity = Gravity.TOP or Gravity.END; x = 20; y = 190 })
+        scroll.visibility = View.GONE
         startForeground(1, buildNotif())
-        scope.launch { val sf = ensureSf(); if (sf != null) engine.start(sf) }
+        scope.launch {
+            val sf = ensureSf()
+            if (sf != null) runCatching { engine.start(sf); engineReady = true }
+            withContext(Dispatchers.Main) { if (::panelStatus.isInitialized) updatePanel() }
+        }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -284,14 +335,14 @@ class OverlayService : Service() {
         } finally { img.close() }
         val board = BoardFinder.find(bmp) ?: run { withContext(Dispatchers.Main) { arrow.clear() }; return }
         val flipped = BoardFinder.isFlipped(bmp,board)
-        if (!engineEnabled) {
+        if (!engineEnabled || !overlayVisible || !arrowsEnabled || !engineReady) {
             withContext(Dispatchers.Main) { arrow.clear() }
             return
         }
         val fen = buildFen(bmp,board)
         if (fen == lastFen) return
         lastFen = fen
-        val best = engine.bestMove(fen) ?: return
+        val best = engine.bestMove(fen, engineDepth) ?: return
         val mc = classify(0, isBest=true, isSac=false)
         withContext(Dispatchers.Main) { arrow.set(board,best,mc,flipped) }
     }
@@ -337,6 +388,50 @@ class OverlayService : Service() {
         } catch (ex: Exception) { null }
     }
 
+    private fun addPanelLabel(value: String): TextView {
+        return TextView(this).apply {
+            text = value; textSize = 15f; setTextColor(Color.WHITE)
+            typeface = Typeface.DEFAULT_BOLD; setPadding(8, 10, 8, 10)
+            panel.addView(this)
+        }
+    }
+
+    private fun addPanelButton(label: String, action: () -> Unit) {
+        val b = Button(this).apply {
+            text = label; isAllCaps = false; textSize = 13f
+            setOnClickListener { action() }
+        }
+        panel.addView(b, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT
+        ))
+    }
+
+    private fun togglePanel() {
+        if (!overlayVisible) {
+            overlayVisible = true
+            launcher.text = "♟"
+        }
+        panel.visibility = if (panel.visibility == View.VISIBLE) View.GONE else View.VISIBLE
+        updatePanel()
+    }
+
+    private fun updatePanel() {
+        if (!::panel.isInitialized) return
+        val buttons = (0 until panel.childCount).mapNotNull { panel.getChildAt(it) as? Button }
+        if (buttons.size >= 5) {
+            buttons[0].text = "ENGINE  •  " + if (engineEnabled) "ON" else "OFF"
+            buttons[1].text = "ARROWS  •  " + if (arrowsEnabled) "ON" else "OFF"
+            buttons[2].text = "EVALUATION  •  " + if (showEvaluation) "ON" else "OFF"
+            buttons[3].text = "ENGINE DEPTH  •  $engineDepth"
+        }
+        if (::panelStatus.isInitialized) {
+            panelStatus.text = when {
+                !engineReady -> "Engine: loading Stockfish…"
+                else -> "Engine: ready • Board recognition: experimental"
+            }
+        }
+    }
+
     private fun buildNotif(): Notification {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O)
             (getSystemService(NOTIFICATION_SERVICE) as NotificationManager)
@@ -351,7 +446,8 @@ class OverlayService : Service() {
     override fun onDestroy() {
         scope.cancel(); vd?.release(); ir?.close(); mp?.stop()
         if (arrow.isAttachedToWindow) wm.removeView(arrow)
-        if (::engineToggle.isInitialized && engineToggle.isAttachedToWindow) wm.removeView(engineToggle)
+        if (::launcher.isInitialized && launcher.isAttachedToWindow) wm.removeView(launcher)
+        if (::panel.isInitialized && panel.parent != null) wm.removeView(panel.parent as View)
         engine.stop(); super.onDestroy()
     }
     override fun onBind(i: Intent?) = null
