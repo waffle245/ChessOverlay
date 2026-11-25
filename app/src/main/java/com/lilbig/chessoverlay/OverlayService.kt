@@ -118,44 +118,79 @@ class ArrowView(context: android.content.Context) : android.view.View(context) {
 }
 
 object BoardFinder {
-    private val LIGHT = intArrayOf(0xFFEEDFB5.toInt(), 0xFFF0D9B5.toInt())
-    private val DARK = intArrayOf(0xFFB58863.toInt(), 0xFF8CA456.toInt())
-
+    // Detect a centered 8x8 checkerboard independent of its palette.
+    // Search the likely phone-board area instead of assuming the board crosses screen midpoint.
     fun find(bmp: Bitmap): RectF? {
-        val w = bmp.width; val h = bmp.height; val y = h/2
-        var bestRun = 0; var bestStart = -1; var runLen = 0; var lastLight = false
-        for (x in 0 until w) {
-            val px = bmp.getPixel(x,y)
-            val isL = isClose(px,LIGHT); val isD = isClose(px,DARK)
-            if (!isL && !isD) { runLen=0; continue }
-            if (runLen==0 || isL!=lastLight) runLen++ else runLen++
-            if (runLen>bestRun) { bestRun=runLen; bestStart=x-runLen+1 }
-            lastLight=isL
+        val w = bmp.width
+        val h = bmp.height
+        val maxSide = min(w, h - 80)
+        val minSide = (w * 0.72f).toInt().coerceAtLeast(240)
+        if (maxSide < minSide) return null
+
+        var bestScore = 0.0
+        var best: RectF? = null
+        val step = 10
+        var side = minSide
+        while (side <= maxSide) {
+            val xMin = ((w - side) / 2 - w * 0.10f).toInt().coerceAtLeast(0)
+            val xMax = ((w - side) / 2 + w * 0.10f).toInt().coerceAtMost(w - side)
+            var x = xMin
+            while (x <= xMax) {
+                var y = (h * 0.12f).toInt()
+                val yMax = (h * 0.82f - side).toInt().coerceAtLeast(y)
+                while (y <= yMax) {
+                    val score = checkerScore(bmp, x, y, side)
+                    if (score > bestScore) {
+                        bestScore = score
+                        best = RectF(x.toFloat(), y.toFloat(), (x + side).toFloat(), (y + side).toFloat())
+                    }
+                    y += step
+                }
+                x += step
+            }
+            side += 8
         }
-        if (bestRun < 50) return null
-        val bw = bestRun; val bx = bestStart
-        val by = (h/2-bw/2).coerceAtLeast(0)
-        return RectF(bx.toFloat(),by.toFloat(),(bx+bw).toFloat(),(by+bw).toFloat())
+        return if (bestScore >= 13.0) best else null
+    }
+
+    private fun checkerScore(bmp: Bitmap, x: Int, y: Int, side: Int): Double {
+        val cell = side / 8f
+        val parity = Array(2) { DoubleArray(3) }
+        val parityCount = IntArray(2)
+        val variance = DoubleArray(2)
+        for (rank in 0..7) for (file in 0..7) {
+            val group = (rank + file) and 1
+            val cx = x + (file + 0.22f) * cell
+            val cy = y + (rank + 0.22f) * cell
+            val points = arrayOf(
+                bmp.getPixel(cx.toInt().coerceIn(0,bmp.width-1), cy.toInt().coerceIn(0,bmp.height-1)),
+                bmp.getPixel((x+(file+0.78f)*cell).toInt().coerceIn(0,bmp.width-1), cy.toInt().coerceIn(0,bmp.height-1)),
+                bmp.getPixel(cx.toInt().coerceIn(0,bmp.width-1), (y+(rank+0.78f)*cell).toInt().coerceIn(0,bmp.height-1)),
+                bmp.getPixel((x+(file+0.78f)*cell).toInt().coerceIn(0,bmp.width-1), (y+(rank+0.78f)*cell).toInt().coerceIn(0,bmp.height-1))
+            )
+            val rgb = DoubleArray(3)
+            for (p in points) {
+                rgb[0] += Color.red(p) / 4.0
+                rgb[1] += Color.green(p) / 4.0
+                rgb[2] += Color.blue(p) / 4.0
+            }
+            for (k in 0..2) parity[group][k] += rgb[k]
+            parityCount[group]++
+        }
+        for (g in 0..1) for (k in 0..2) parity[g][k] /= parityCount[g]
+        val contrast = sqrt((0..2).sumOf { k ->
+            val d = parity[0][k] - parity[1][k]; d*d
+        })
+        // Checkerboard contrast is useful; reject near-uniform screen regions.
+        return contrast
     }
 
     fun isFlipped(bmp: Bitmap, board: RectF): Boolean {
-        val cw = board.width()/8f; val ch = board.height()/8f
-        var lightTop = 0
-        for (file in 0..7) {
-            val cx = (board.left+file*cw+cw/2f).toInt().coerceIn(0,bmp.width-1)
-            val cy = (board.top+ch/2f).toInt().coerceIn(0,bmp.height-1)
-            val px = bmp.getPixel(cx,cy)
-            if ((Color.red(px)+Color.green(px)+Color.blue(px))/3 > 180) lightTop++
-        }
-        return lightTop > 4
-    }
-
-    private fun isClose(px: Int, targets: IntArray) = targets.any { t ->
-        val dr=Color.red(px)-Color.red(t); val dg=Color.green(px)-Color.green(t); val db=Color.blue(px)-Color.blue(t)
-        dr*dr+dg*dg+db*db < 2500
+        // Chess.com normally exposes coordinates around the board. Without reliable
+        // orientation metadata, default to White at the bottom.
+        return false
     }
 }
-
 class Engine {
     private lateinit var proc: java.lang.Process
     private lateinit var w: BufferedWriter
@@ -216,6 +251,7 @@ class OverlayService : Service() {
     @Volatile private var engineDepth = 15
     private lateinit var launcher: TextView
     private lateinit var panel: LinearLayout
+    private lateinit var panelContainer: ScrollView
     private lateinit var panelStatus: TextView
     private var lastFen = ""
     private var sw = 0; private var sh = 0; private var dpi = 0
@@ -265,7 +301,7 @@ class OverlayService : Service() {
                 setStroke(2, 0xFF46536B.toInt())
             }
         }
-        val scroll = ScrollView(this).apply { addView(panel) }
+        panelContainer = ScrollView(this).apply { addView(panel) }
         addPanelLabel("CHESS OVERLAY")
         panelStatus = addPanelLabel("Board: waiting for screen capture")
         addPanelButton("ENGINE  •  OFF") {
@@ -289,12 +325,12 @@ class OverlayService : Service() {
         addPanelButton("HIDE FULL OVERLAY") {
             overlayVisible = false
             arrow.clear()
-            panel.visibility = View.GONE
+            panelContainer.visibility = View.GONE
             launcher.text = "♟"
             launcher.contentDescription = "Restore ChessOverlay"
         }
-        addPanelButton("CLOSE MENU") { panel.visibility = View.GONE }
-        wm.addView(scroll, WindowManager.LayoutParams(
+        addPanelButton("CLOSE MENU") { panelContainer.visibility = View.GONE }
+        wm.addView(panelContainer, WindowManager.LayoutParams(
             (sw * 0.72f).toInt().coerceAtMost(620),
             WindowManager.LayoutParams.WRAP_CONTENT,
             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
@@ -302,7 +338,7 @@ class OverlayService : Service() {
                 WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
             PixelFormat.TRANSLUCENT
         ).apply { gravity = Gravity.TOP or Gravity.END; x = 20; y = 190 })
-        scroll.visibility = View.GONE
+        panelContainer.visibility = View.GONE
         startForeground(1, buildNotif())
         scope.launch {
             val sf = ensureSf()
@@ -411,7 +447,7 @@ class OverlayService : Service() {
             overlayVisible = true
             launcher.text = "♟"
         }
-        panel.visibility = if (panel.visibility == View.VISIBLE) View.GONE else View.VISIBLE
+        panelContainer.visibility = if (panelContainer.visibility == View.VISIBLE) View.GONE else View.VISIBLE
         updatePanel()
     }
 
@@ -447,7 +483,7 @@ class OverlayService : Service() {
         scope.cancel(); vd?.release(); ir?.close(); mp?.stop()
         if (arrow.isAttachedToWindow) wm.removeView(arrow)
         if (::launcher.isInitialized && launcher.isAttachedToWindow) wm.removeView(launcher)
-        if (::panel.isInitialized && panel.parent != null) wm.removeView(panel.parent as View)
+        if (::panelContainer.isInitialized && panelContainer.isAttachedToWindow) wm.removeView(panelContainer)
         engine.stop(); super.onDestroy()
     }
     override fun onBind(i: Intent?) = null
