@@ -6,6 +6,7 @@
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.INTERNET" />
     <application
+        android:extractNativeLibs="true"
         android:allowBackup="false"
         android:label="ChessOverlay"
         android:supportsRtl="true"
