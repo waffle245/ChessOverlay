@@ -177,7 +177,7 @@ object BoardFinder {
             for (k in 0..2) parity[group][k] += rgb[k]
             parityCount[group]++
         }
-        for (g in 0..1) for (k in 0..2) parity[g][k] /= parityCount[g]
+        for (g in 0..1) for (k in 0..2) parity[g][k] = parity[g][k] / parityCount[g]
         val contrast = sqrt((0..2).sumOf { k ->
             val d = parity[0][k] - parity[1][k]; d*d
         })
