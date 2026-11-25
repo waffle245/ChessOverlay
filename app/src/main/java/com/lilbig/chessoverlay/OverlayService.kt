@@ -56,43 +56,50 @@ class ArrowView(context: android.content.Context) : android.view.View(context) {
     override fun onDraw(canvas: Canvas) {
         val b = boardRect ?: return
         val mv = move ?: return
-        val c = cls ?: return
-        val cw = b.width()/8f; val ch = b.height()/8f
-        val from = center(mv.substring(0,2),b,cw,ch)
-        val to = center(mv.substring(2,4),b,cw,ch)
-        val col = c.argb
+        val cw = b.width() / 8f
+        val ch = b.height() / 8f
+        val from = center(mv.substring(0, 2), b, cw, ch)
+        val to = center(mv.substring(2, 4), b, cw, ch)
 
-        fill.color = Color.argb(100,Color.red(col),Color.green(col),Color.blue(col))
-        canvas.drawRect(squareRect(mv.substring(0,2),b,cw,ch),fill)
-        fill.color = Color.argb(180,Color.red(col),Color.green(col),Color.blue(col))
-        canvas.drawRect(squareRect(mv.substring(2,4),b,cw,ch),fill)
+        // Match the bold, translucent analysis arrow shown in the reference:
+        // dark charcoal body, rounded shaft, and a wide triangular point.
+        val dx = to.x - from.x
+        val dy = to.y - from.y
+        val length = hypot(dx, dy)
+        if (length < 1f) return
+        val ux = dx / length
+        val uy = dy / length
+        val px = -uy
+        val py = ux
 
-        val thick = cw*0.18f
-        val angle = atan2((to.y-from.y).toDouble(),(to.x-from.x).toDouble()).toFloat()
-        val hLen = thick*2.8f; val hWid = thick*1.6f
-        val ex = cos(angle); val ey = sin(angle)
-        val se = PointF(to.x-ex*hLen, to.y-ey*hLen)
+        val shaftWidth = cw * 0.19f
+        val headLength = cw * 0.95f
+        val headHalfWidth = cw * 0.48f
+        val baseX = to.x - ux * headLength
+        val baseY = to.y - uy * headLength
+        val shaftEndX = baseX
+        val shaftEndY = baseY
 
-        shadow.strokeWidth = thick+6f
-        canvas.drawLine(from.x+3,from.y+3,se.x+3,se.y+3,shadow)
-        stroke.color = col; stroke.strokeWidth = thick
-        canvas.drawLine(from.x,from.y,se.x,se.y,stroke)
+        val arrowPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = 0xAA20242B.toInt()
+            style = Paint.Style.STROKE
+            strokeWidth = shaftWidth
+            strokeCap = Paint.Cap.ROUND
+            strokeJoin = Paint.Join.ROUND
+        }
+        canvas.drawLine(from.x, from.y, shaftEndX, shaftEndY, arrowPaint)
 
-        val path = Path().apply {
-            moveTo(to.x,to.y)
-            lineTo(se.x+cos(angle+PI.toFloat()/2)*hWid, se.y+sin(angle+PI.toFloat()/2)*hWid)
-            lineTo(se.x+cos(angle-PI.toFloat()/2)*hWid, se.y+sin(angle-PI.toFloat()/2)*hWid)
+        val head = Path().apply {
+            moveTo(to.x, to.y)
+            lineTo(baseX + px * headHalfWidth, baseY + py * headHalfWidth)
+            lineTo(baseX - px * headHalfWidth, baseY - py * headHalfWidth)
             close()
         }
-        fill.color = col; canvas.drawPath(path,fill)
-
-        val br = cw*0.36f; val bx = to.x+cw*0.3f; val by = to.y-ch*0.3f
-        fill.color = 0xBB000000.toInt(); canvas.drawCircle(bx+3,by+3,br,fill)
-        fill.color = col; canvas.drawCircle(bx,by,br,fill)
-        txt.textSize = br*0.85f; canvas.drawText(c.emoji,bx,by+txt.textSize/3f,txt)
-        txt.textSize = br*0.55f; txt.color = col
-        canvas.drawText(c.label,bx,by+br+br*0.6f,txt)
-        txt.color = Color.WHITE
+        val headPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = 0xAA20242B.toInt()
+            style = Paint.Style.FILL
+        }
+        canvas.drawPath(head, headPaint)
     }
 
     private fun center(sq: String, b: RectF, cw: Float, ch: Float): PointF {
