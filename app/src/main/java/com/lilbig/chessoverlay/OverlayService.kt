@@ -419,12 +419,30 @@ class OverlayService : Service() {
 
     private fun ensureSf(): String? {
         val dest = File(filesDir, "stockfish")
+
+        // Android may preserve a downloaded file without its executable bit.
+        // Apply owner-only execute/read permissions every time before launching.
+        fun makeExecutable(file: File) {
+            if (!file.exists() || file.length() < 500_000) {
+                throw IOException("Stockfish binary is missing or incomplete")
+            }
+            try {
+                android.system.Os.chmod(file.absolutePath, 448) // 0700
+            } catch (e: Exception) {
+                throw IOException("Could not set Stockfish permissions: ${e.message}", e)
+            }
+            if (!file.canExecute()) {
+                throw IOException("Stockfish is still not executable after chmod")
+            }
+        }
+
         if (dest.exists() && dest.length() > 500_000) {
-            dest.setExecutable(true)
+            makeExecutable(dest)
             return dest.absolutePath
         }
+
         dest.delete()
-        val abi = Build.SUPPORTED_ABIS.firstOrNull() ?: return null
+        val abi = Build.SUPPORTED_ABIS.firstOrNull() ?: throw IOException("Could not detect phone CPU")
         val asset = when {
             abi == "arm64-v8a" -> "stockfish-android-armv8.tar"
             abi == "armeabi-v7a" -> "stockfish-android-armv7.tar"
@@ -440,7 +458,9 @@ class OverlayService : Service() {
         connection.getInputStream().use { input ->
             FileOutputStream(archive).use { output -> input.copyTo(output) }
         }
-        // Stockfish publishes Android engines as TAR archives, not ZIP files.
+
+        // Extract the regular Stockfish executable from the TAR archive.
+        var extracted = false
         RandomAccessFile(archive, "r").use { tar ->
             val header = ByteArray(512)
             while (tar.filePointer + 512 <= tar.length()) {
@@ -452,7 +472,7 @@ class OverlayService : Service() {
                 val dataStart = tar.filePointer
                 val type = header[156].toInt().toChar()
                 val isRegular = type == '\u0000' || type == '0'
-                if (isRegular && size > 500_000 && (name.contains("stockfish", true) || name.isNotBlank())) {
+                if (isRegular && size > 500_000 && name.isNotBlank()) {
                     FileOutputStream(dest).use { out ->
                         val buffer = ByteArray(64 * 1024)
                         var remaining = size
@@ -463,17 +483,18 @@ class OverlayService : Service() {
                             remaining -= n
                         }
                     }
+                    extracted = true
                     break
                 }
                 tar.seek(dataStart + ((size + 511) / 512) * 512)
             }
         }
         archive.delete()
-        if (!dest.exists() || dest.length() < 500_000) {
+        if (!extracted) {
             dest.delete()
-            throw IOException("Stockfish binary was not found in the Android archive")
+            throw IOException("Stockfish executable was not found in the Android archive")
         }
-        if (!dest.setExecutable(true, true)) throw IOException("Could not mark Stockfish executable")
+        makeExecutable(dest)
         return dest.absolutePath
     }
 
