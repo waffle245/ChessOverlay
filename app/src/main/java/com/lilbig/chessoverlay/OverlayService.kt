@@ -245,6 +245,7 @@ class OverlayService : Service() {
     private val engine = Engine()
     @Volatile private var engineEnabled = false
     @Volatile private var engineReady = false
+    @Volatile private var engineStatus = "Engine: preparing Stockfish…"
     @Volatile private var arrowsEnabled = true
     @Volatile private var showEvaluation = true
     @Volatile private var overlayVisible = true
@@ -341,8 +342,17 @@ class OverlayService : Service() {
         panelContainer.visibility = View.GONE
         startForeground(1, buildNotif())
         scope.launch {
-            val sf = ensureSf()
-            if (sf != null) runCatching { engine.start(sf); engineReady = true }
+            try {
+                engineStatus = "Engine: downloading Stockfish…"
+                val sf = ensureSf() ?: throw IOException("No compatible Stockfish binary found")
+                engineStatus = "Engine: starting Stockfish…"
+                engine.start(sf)
+                engineReady = true
+                engineStatus = "Engine: ready"
+            } catch (e: Exception) {
+                engineReady = false
+                engineStatus = "Engine error: ${e.message ?: e.javaClass.simpleName}"
+            }
             withContext(Dispatchers.Main) { if (::panelStatus.isInitialized) updatePanel() }
         }
     }
@@ -408,20 +418,63 @@ class OverlayService : Service() {
     }
 
     private fun ensureSf(): String? {
-        val dest = File(filesDir,"stockfish")
-        if (dest.exists() && dest.length() > 500_000) { dest.setExecutable(true); return dest.absolutePath }
-        return try {
-            val abi = Build.SUPPORTED_ABIS[0]
-            val url = if (abi.startsWith("x86"))
-                "https://github.com/official-stockfish/Stockfish/releases/download/sf_16/stockfish-android-x86-64.zip"
-            else
-                "https://github.com/official-stockfish/Stockfish/releases/download/sf_16/stockfish-android-armv8.zip"
-            ZipInputStream(URL(url).openStream().buffered()).use { zis ->
-                var e = zis.nextEntry
-                while (e != null) { if (!e.isDirectory && !e.name.contains(".")) { FileOutputStream(dest).use { zis.copyTo(it) }; break }; e = zis.nextEntry }
+        val dest = File(filesDir, "stockfish")
+        if (dest.exists() && dest.length() > 500_000) {
+            dest.setExecutable(true)
+            return dest.absolutePath
+        }
+        dest.delete()
+        val abi = Build.SUPPORTED_ABIS.firstOrNull() ?: return null
+        val asset = when {
+            abi == "arm64-v8a" -> "stockfish-android-armv8.tar"
+            abi == "armeabi-v7a" -> "stockfish-android-armv7.tar"
+            else -> throw IOException("Unsupported phone CPU: $abi")
+        }
+        val url = URL("https://github.com/official-stockfish/Stockfish/releases/download/sf_16/$asset")
+        val archive = File(cacheDir, asset)
+        val connection = url.openConnection().apply {
+            connectTimeout = 20000
+            readTimeout = 60000
+            setRequestProperty("User-Agent", "ChessOverlay-Android")
+        }
+        connection.getInputStream().use { input ->
+            FileOutputStream(archive).use { output -> input.copyTo(output) }
+        }
+        // Stockfish publishes Android engines as TAR archives, not ZIP files.
+        RandomAccessFile(archive, "r").use { tar ->
+            val header = ByteArray(512)
+            while (tar.filePointer + 512 <= tar.length()) {
+                tar.readFully(header)
+                if (header.all { it == 0.toByte() }) break
+                val name = String(header, 0, 100).trim('\u0000', ' ')
+                val sizeText = String(header, 124, 12).trim('\u0000', ' ').trim()
+                val size = sizeText.toLongOrNull(8) ?: 0L
+                val dataStart = tar.filePointer
+                val type = header[156].toInt().toChar()
+                val isRegular = type == '\u0000' || type == '0'
+                if (isRegular && size > 500_000 && (name.contains("stockfish", true) || name.isNotBlank())) {
+                    FileOutputStream(dest).use { out ->
+                        val buffer = ByteArray(64 * 1024)
+                        var remaining = size
+                        while (remaining > 0) {
+                            val n = tar.read(buffer, 0, minOf(buffer.size.toLong(), remaining).toInt())
+                            if (n < 0) throw EOFException("Stockfish archive ended unexpectedly")
+                            out.write(buffer, 0, n)
+                            remaining -= n
+                        }
+                    }
+                    break
+                }
+                tar.seek(dataStart + ((size + 511) / 512) * 512)
             }
-            dest.setExecutable(true); dest.absolutePath
-        } catch (ex: Exception) { null }
+        }
+        archive.delete()
+        if (!dest.exists() || dest.length() < 500_000) {
+            dest.delete()
+            throw IOException("Stockfish binary was not found in the Android archive")
+        }
+        if (!dest.setExecutable(true, true)) throw IOException("Could not mark Stockfish executable")
+        return dest.absolutePath
     }
 
     private fun addPanelLabel(value: String): TextView {
@@ -461,10 +514,7 @@ class OverlayService : Service() {
             buttons[3].text = "ENGINE DEPTH  •  $engineDepth"
         }
         if (::panelStatus.isInitialized) {
-            panelStatus.text = when {
-                !engineReady -> "Engine: loading Stockfish…"
-                else -> "Engine: ready • Board recognition: experimental"
-            }
+            panelStatus.text = if (engineReady) "Engine: ready • Board recognition: experimental" else engineStatus
         }
     }
 
