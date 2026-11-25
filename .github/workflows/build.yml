@@ -45,6 +45,41 @@ jobs:
       - name: Make gradlew executable
         run: chmod +x gradlew
 
+      - name: Package Stockfish for Android ABIs
+        shell: bash
+        run: |
+          set -euo pipefail
+          package_engine() {
+            abi="$1"
+            asset="$2"
+            archive="/tmp/${asset}"
+            destination="app/src/main/jniLibs/${abi}/libstockfish.so"
+            mkdir -p "$(dirname "$destination")"
+            curl -fL --retry 3 "https://github.com/official-stockfish/Stockfish/releases/download/sf_16/${asset}" -o "$archive"
+            python3 - "$archive" "$destination" <<'PY'
+          import os, sys, tarfile
+          archive, destination = sys.argv[1], sys.argv[2]
+          with tarfile.open(archive, "r:*") as tf:
+              members = [m for m in tf.getmembers()
+                         if m.isfile() and m.size > 500_000
+                         and not m.name.lower().endswith((".nnue", ".txt", ".md"))]
+              members.sort(key=lambda m: ("stockfish" not in os.path.basename(m.name).lower(), -m.size))
+              if not members:
+                  raise SystemExit("No Stockfish executable found in " + archive)
+              src = tf.extractfile(members[0])
+              with open(destination, "wb") as out:
+                  while True:
+                      chunk = src.read(1024 * 1024)
+                      if not chunk:
+                          break
+                      out.write(chunk)
+          os.chmod(destination, 0o755)
+          print("Packaged", destination, "from", members[0].name)
+          PY
+          }
+          package_engine arm64-v8a stockfish-android-armv8.tar
+          package_engine armeabi-v7a stockfish-android-armv7.tar
+
       - name: Build ChessOverlay APK
         run: ./gradlew assembleDebug --no-daemon --stacktrace
 
