@@ -146,7 +146,7 @@ object BoardFinder {
 }
 
 class Engine {
-    private lateinit var proc: Process
+    private lateinit var proc: java.lang.Process
     private lateinit var w: BufferedWriter
     private lateinit var r: BufferedReader
 
@@ -207,9 +207,14 @@ class OverlayService : Service() {
         @Suppress("DEPRECATION") wm.defaultDisplay.getRealMetrics(dm)
         sw = dm.widthPixels; sh = dm.heightPixels; dpi = dm.densityDpi
         arrow = ArrowView(this)
-        wm.addView(arrow, LayoutParams(sw,sh,TYPE_APPLICATION_OVERLAY,
-            FLAG_NOT_FOCUSABLE or FLAG_NOT_TOUCHABLE or FLAG_LAYOUT_IN_SCREEN,
-            PixelFormat.TRANSLUCENT).apply { gravity = Gravity.TOP or Gravity.START })
+        wm.addView(arrow, WindowManager.LayoutParams(
+            sw, sh,
+            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
+                WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+            PixelFormat.TRANSLUCENT
+        ).apply { gravity = Gravity.TOP or Gravity.START })
         startForeground(1, buildNotif())
         scope.launch { val sf = ensureSf(); if (sf != null) engine.start(sf) }
     }
