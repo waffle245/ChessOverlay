@@ -191,6 +191,8 @@ object BoardFinder {
         return false
     }
 }
+data class EngineResult(val bestMove: String, val whiteScoreCp: Int, val mate: Int? = null)
+
 class Engine {
     private lateinit var proc: java.lang.Process
     private lateinit var w: BufferedWriter
@@ -206,23 +208,34 @@ class Engine {
         cmd("isready"); await("readyok")
     }
 
-    fun bestMove(fen: String, depth: Int = 15): String? {
+    fun analyze(fen: String, depth: Int = 15): EngineResult? {
         cmd("position fen $fen")
         cmd("go depth $depth")
-        return readLines().lastOrNull { it.startsWith("bestmove") }
-            ?.split(" ")?.getOrNull(1)?.takeIf { it != "(none)" }
-    }
-
-    fun score(fen: String, depth: Int = 13): Int {
-        cmd("position fen $fen")
-        cmd("go depth $depth")
-        val lines = readLines()
-        val info = lines.lastOrNull { it.contains("score cp") || it.contains("score mate") } ?: return 0
-        return when {
-            info.contains("score cp") -> info.substringAfter("score cp ").trim().split(" ")[0].toIntOrNull() ?: 0
-            info.contains("score mate") -> { val m = info.substringAfter("score mate ").trim().split(" ")[0].toIntOrNull() ?: 1; if (m>0) 30000 else -30000 }
-            else -> 0
+        var best: String? = null
+        var scoreCp: Int? = null
+        var mate: Int? = null
+        while (true) {
+            val line = r.readLine() ?: break
+            if (line.startsWith("info ") && (line.contains(" score cp ") || line.contains(" score mate "))) {
+                val tokens = line.split(Regex("\\s+"))
+                val scoreIndex = tokens.indexOf("score")
+                if (scoreIndex >= 0 && scoreIndex + 2 < tokens.size) {
+                    when (tokens[scoreIndex + 1]) {
+                        "cp" -> { scoreCp = tokens[scoreIndex + 2].toIntOrNull(); mate = null }
+                        "mate" -> { mate = tokens[scoreIndex + 2].toIntOrNull(); scoreCp = null }
+                    }
+                }
+            }
+            if (line.startsWith("bestmove ")) {
+                best = line.split(" ").getOrNull(1)
+                break
+            }
         }
+        val move = best?.takeIf { it != "(none)" } ?: return null
+        val sideToMove = fen.split(" ").getOrNull(1) ?: "w"
+        val rawCp = scoreCp ?: (mate?.let { if (it > 0) 30000 else -30000 } ?: 0)
+        val whiteCp = if (sideToMove == "b") -rawCp else rawCp
+        return EngineResult(move, whiteCp, mate?.let { if (sideToMove == "b") -it else it })
     }
 
     fun stop() { try { cmd("quit"); proc.waitFor() } catch (_: Exception) {}; proc.destroy() }
@@ -254,6 +267,7 @@ class OverlayService : Service() {
     private lateinit var panel: LinearLayout
     private lateinit var panelContainer: ScrollView
     private lateinit var panelStatus: TextView
+    private lateinit var evaluationView: TextView
     private var lastFen = ""
     private var sw = 0; private var sh = 0; private var dpi = 0
 
@@ -272,6 +286,23 @@ class OverlayService : Service() {
                 WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
             PixelFormat.TRANSLUCENT
         ).apply { gravity = Gravity.TOP or Gravity.START })
+        evaluationView = TextView(this).apply {
+            text = "Eval: waiting"
+            textSize = 16f
+            setTextColor(Color.WHITE)
+            setPadding(18, 10, 18, 10)
+            background = android.graphics.drawable.GradientDrawable().apply {
+                setColor(0xDD20242B.toInt()); cornerRadius = 18f
+            }
+            visibility = View.GONE
+        }
+        wm.addView(evaluationView, WindowManager.LayoutParams(
+            WindowManager.LayoutParams.WRAP_CONTENT,
+            WindowManager.LayoutParams.WRAP_CONTENT,
+            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE,
+            PixelFormat.TRANSLUCENT
+        ).apply { gravity = Gravity.TOP or Gravity.START; x = 18; y = 70 })
 
         // Compact floating launcher remains available when the full overlay is hidden.
         launcher = TextView(this).apply {
@@ -381,16 +412,30 @@ class OverlayService : Service() {
         } finally { img.close() }
         val board = BoardFinder.find(bmp) ?: run { withContext(Dispatchers.Main) { arrow.clear() }; return }
         val flipped = BoardFinder.isFlipped(bmp,board)
-        if (!engineEnabled || !overlayVisible || !arrowsEnabled || !engineReady) {
-            withContext(Dispatchers.Main) { arrow.clear() }
+        if (!engineEnabled || !overlayVisible || !engineReady) {
+            withContext(Dispatchers.Main) {
+                arrow.clear()
+                evaluationView.visibility = View.GONE
+            }
             return
         }
         val fen = buildFen(bmp,board)
         if (fen == lastFen) return
         lastFen = fen
-        val best = engine.bestMove(fen, engineDepth) ?: return
-        val mc = classify(0, isBest=true, isSac=false)
-        withContext(Dispatchers.Main) { arrow.set(board,best,mc,flipped) }
+        val result = engine.analyze(fen, engineDepth)
+        withContext(Dispatchers.Main) {
+            if (result == null) {
+                arrow.clear()
+                evaluationView.text = "Eval: unavailable"
+            } else {
+                if (arrowsEnabled) arrow.set(board,result.bestMove,MoveClass.BEST,flipped)
+                else arrow.clear()
+                val score = result.whiteScoreCp / 100.0
+                evaluationView.text = result.mate?.let { "Mate: ${if (it > 0) "+" else ""}$it" }
+                    ?: "Eval: ${if (score > 0) "+" else ""}%.2f".format(score)
+                evaluationView.visibility = if (showEvaluation) View.VISIBLE else View.GONE
+            }
+        }
     }
 
     private fun buildFen(bmp: Bitmap, board: RectF): String {
@@ -487,6 +532,7 @@ class OverlayService : Service() {
     override fun onDestroy() {
         scope.cancel(); vd?.release(); ir?.close(); mp?.stop()
         if (arrow.isAttachedToWindow) wm.removeView(arrow)
+        if (::evaluationView.isInitialized && evaluationView.isAttachedToWindow) wm.removeView(evaluationView)
         if (::launcher.isInitialized && launcher.isAttachedToWindow) wm.removeView(launcher)
         if (::panelContainer.isInitialized && panelContainer.isAttachedToWindow) wm.removeView(panelContainer)
         engine.stop(); super.onDestroy()
