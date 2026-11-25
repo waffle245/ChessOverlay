@@ -418,84 +418,18 @@ class OverlayService : Service() {
     }
 
     private fun ensureSf(): String? {
-        val dest = File(filesDir, "stockfish")
-
-        // Android may preserve a downloaded file without its executable bit.
-        // Apply owner-only execute/read permissions every time before launching.
-        fun makeExecutable(file: File) {
-            if (!file.exists() || file.length() < 500_000) {
-                throw IOException("Stockfish binary is missing or incomplete")
-            }
-            try {
-                android.system.Os.chmod(file.absolutePath, 448) // 0700
-            } catch (e: Exception) {
-                throw IOException("Could not set Stockfish permissions: ${e.message}", e)
-            }
-            if (!file.canExecute()) {
-                throw IOException("Stockfish is still not executable after chmod")
-            }
+        // Android blocks execution of downloaded binaries from writable app-data
+        // directories on many modern devices (SELinux / noexec). The build
+        // packages Stockfish as a native library so PackageManager extracts it
+        // into nativeLibraryDir, which is the supported executable location.
+        val binary = File(applicationInfo.nativeLibraryDir, "libstockfish.so")
+        if (!binary.isFile || binary.length() < 500_000) {
+            throw IOException("Packaged Stockfish is missing for this CPU. Reinstall the latest APK.")
         }
-
-        if (dest.exists() && dest.length() > 500_000) {
-            makeExecutable(dest)
-            return dest.absolutePath
+        if (!binary.canExecute()) {
+            throw IOException("Android did not mark the packaged Stockfish executable. Reinstall the latest APK.")
         }
-
-        dest.delete()
-        val abi = Build.SUPPORTED_ABIS.firstOrNull() ?: throw IOException("Could not detect phone CPU")
-        val asset = when {
-            abi == "arm64-v8a" -> "stockfish-android-armv8.tar"
-            abi == "armeabi-v7a" -> "stockfish-android-armv7.tar"
-            else -> throw IOException("Unsupported phone CPU: $abi")
-        }
-        val url = URL("https://github.com/official-stockfish/Stockfish/releases/download/sf_16/$asset")
-        val archive = File(cacheDir, asset)
-        val connection = url.openConnection().apply {
-            connectTimeout = 20000
-            readTimeout = 60000
-            setRequestProperty("User-Agent", "ChessOverlay-Android")
-        }
-        connection.getInputStream().use { input ->
-            FileOutputStream(archive).use { output -> input.copyTo(output) }
-        }
-
-        // Extract the regular Stockfish executable from the TAR archive.
-        var extracted = false
-        RandomAccessFile(archive, "r").use { tar ->
-            val header = ByteArray(512)
-            while (tar.filePointer + 512 <= tar.length()) {
-                tar.readFully(header)
-                if (header.all { it == 0.toByte() }) break
-                val name = String(header, 0, 100).trim('\u0000', ' ')
-                val sizeText = String(header, 124, 12).trim('\u0000', ' ').trim()
-                val size = sizeText.toLongOrNull(8) ?: 0L
-                val dataStart = tar.filePointer
-                val type = header[156].toInt().toChar()
-                val isRegular = type == '\u0000' || type == '0'
-                if (isRegular && size > 500_000 && name.isNotBlank()) {
-                    FileOutputStream(dest).use { out ->
-                        val buffer = ByteArray(64 * 1024)
-                        var remaining = size
-                        while (remaining > 0) {
-                            val n = tar.read(buffer, 0, minOf(buffer.size.toLong(), remaining).toInt())
-                            if (n < 0) throw EOFException("Stockfish archive ended unexpectedly")
-                            out.write(buffer, 0, n)
-                            remaining -= n
-                        }
-                    }
-                    extracted = true
-                    break
-                }
-                tar.seek(dataStart + ((size + 511) / 512) * 512)
-            }
-        }
-        archive.delete()
-        if (!extracted) {
-            dest.delete()
-            throw IOException("Stockfish executable was not found in the Android archive")
-        }
-        makeExecutable(dest)
-        return dest.absolutePath
+        return binary.absolutePath
     }
 
     private fun addPanelLabel(value: String): TextView {
