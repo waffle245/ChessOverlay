@@ -27,6 +27,9 @@ class OverlayService : Service() {
     private lateinit var lp: WindowManager.LayoutParams
     private lateinit var logoLp: WindowManager.LayoutParams
     private lateinit var colorButton: Button
+    private lateinit var controlsLayout: LinearLayout
+    private var autoThink = false
+    private var boardOnly = false
     private var blackAtBottom = false
     private var scale = 0.78f
     private var ready = false
@@ -81,9 +84,11 @@ class OverlayService : Service() {
         boardView=StudyBoardView(this) {
             best=""; eval.text="EVAL   —"; engineText.text="ENGINE   Position changed"
             status.text="Position updated • Tap THINK to analyze"
+            if(autoThink && boardView.sideToMove()==playerSide()) analyze()
         }
         panel.addView(boardView,LinearLayout.LayoutParams(-1,dp((280*scale).toInt())).apply { topMargin=dp(4); bottomMargin=dp(5) })
         val rows=LinearLayout(this).apply { orientation=LinearLayout.VERTICAL }
+        controlsLayout=rows
         fun row()=LinearLayout(this).apply { orientation=LinearLayout.HORIZONTAL; rows.addView(this) }
         fun btn(r:LinearLayout,t:String,fn:(Button)->Unit):Button {
             val b=Button(this).apply { text=t; isAllCaps=false; textSize=11f; setTextColor(Color.WHITE)
@@ -111,6 +116,9 @@ class OverlayService : Service() {
         }
         r.addView(sizeSlider,LinearLayout.LayoutParams(0,dp(42),1f))
         r=row()
+        btn(r,"Auto think: OFF"){autoThink=!autoThink;it.text=if(autoThink)"Auto think: ON" else "Auto think: OFF";status.text=if(autoThink)"Auto-think enabled for your turns on this study board" else "Auto-think disabled"}
+        btn(r,"Board only"){setBoardOnly(!boardOnly)}
+        r=row()
         btn(r,"Best arrow: ON"){boardView.showArrow=!boardView.showArrow;boardView.bestMove=if(boardView.showArrow)best else "";boardView.invalidate();it.text=if(boardView.showArrow)"Best arrow: ON" else "Best arrow: OFF"}
         btn(r,"Reset view"){lp.x=0;lp.y=dp(58);wm.updateViewLayout(panel,lp);changeScale(.78f)}
         panel.addView(rows)
@@ -119,6 +127,16 @@ class OverlayService : Service() {
         panel.addView(label("Offline study board",10f,Color.LTGRAY).apply{gravity=Gravity.CENTER})
     }
 
+    private fun playerSide()=if(blackAtBottom) Side.BLACK else Side.WHITE
+    private fun setBoardOnly(enabled:Boolean){
+        boardOnly=enabled
+        controlsLayout.visibility=if(enabled)View.GONE else View.VISIBLE
+        status.visibility=if(enabled)View.GONE else View.VISIBLE
+        eval.visibility=if(enabled)View.GONE else View.VISIBLE
+        engineText.visibility=if(enabled)View.GONE else View.VISIBLE
+        panel.setPadding(if(enabled)dp(3) else dp(8),if(enabled)dp(3) else dp(6),if(enabled)dp(3) else dp(8),if(enabled)dp(3) else dp(8))
+        if(panel.isAttachedToWindow)wm.updateViewLayout(panel,lp)
+    }
     private fun changeScale(value:Float) {
         scale=value.coerceIn(.55f,1.0f)
         lp.width=dp((300*scale).toInt())
@@ -236,6 +254,7 @@ private class StudyBoardView(context:android.content.Context,private val changed
     private val fill=Paint(Paint.ANTI_ALIAS_FLAG).apply{textAlign=Paint.Align.CENTER;typeface=Typeface.create("sans-serif",Typeface.NORMAL)}
     private val outline=Paint(Paint.ANTI_ALIAS_FLAG).apply{textAlign=Paint.Align.CENTER;typeface=Typeface.create("serif",Typeface.BOLD);style=Paint.Style.STROKE;strokeJoin=Paint.Join.ROUND;strokeCap=Paint.Cap.ROUND}
     fun fen()=game.fen
+    fun sideToMove()=game.sideToMove
     fun reset(){game.loadFromFen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1");history.clear();selected=null;targets=emptySet();bestMove="";invalidate();changed(game.fen)}
     fun undo(){if(history.isNotEmpty()){game.undoMove();history.removeAt(history.lastIndex);selected=null;targets=emptySet();bestMove="";invalidate();changed(game.fen)}}
     private fun square(file:Int,rank:Int)=Square.valueOf(("" + ('a'+file) + rank).uppercase())
