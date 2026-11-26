@@ -28,6 +28,7 @@ class OverlayService : Service() {
     private lateinit var logoLp: WindowManager.LayoutParams
     private lateinit var colorButton: Button
     private lateinit var thinkButton: Button
+    private lateinit var autoThinkButton: Button
     private lateinit var controlsLayout: LinearLayout
     private var autoThink = false
     private var mirrorOnly = false
@@ -111,6 +112,10 @@ class OverlayService : Service() {
             mirrorOnly=!mirrorOnly
             if(mirrorOnly){
                 autoThink=false
+                autoThinkButton.text="Auto think: OFF"
+                best=""
+                boardView.bestMove=""
+                boardView.invalidate()
                 thinkButton.isEnabled=false
                 thinkButton.alpha=0.45f
                 status.text="Mirror only ON • Stockfish and Auto Think are locked"
@@ -136,7 +141,7 @@ class OverlayService : Service() {
         }
         r.addView(sizeSlider,LinearLayout.LayoutParams(0,dp(42),1f))
         r=row()
-        btn(r,"Auto think: OFF"){ if(mirrorOnly){status.text="Auto Think is unavailable in Mirror Only mode"}else{autoThink=!autoThink;it.text=if(autoThink)"Auto think: ON" else "Auto think: OFF";status.text=if(autoThink)"Auto-think enabled for your turns on this study board" else "Auto-think disabled"} }
+        autoThinkButton=btn(r,"Auto think: OFF"){ if(mirrorOnly){status.text="Auto Think is unavailable in Mirror Only mode"}else{autoThink=!autoThink;it.text=if(autoThink)"Auto think: ON" else "Auto think: OFF";status.text=if(autoThink)"Auto-think enabled for your turns on this study board" else "Auto-think disabled"} }
         btn(r,"Board only"){setBoardOnly(!boardOnly)}
         r=row()
         btn(r,"Best arrow: ON"){boardView.showArrow=!boardView.showArrow;boardView.bestMove=if(boardView.showArrow)best else "";boardView.invalidate();it.text=if(boardView.showArrow)"Best arrow: ON" else "Best arrow: OFF"}
@@ -213,6 +218,7 @@ class OverlayService : Service() {
                         if(line.startsWith("bestmove ")){bm=line.split(" ").getOrNull(1)?:"";break}
                     };Pair(bm,score)
                 }}
+                if(mirrorOnly){best="";boardView.bestMove="";boardView.invalidate();status.text="Mirror only is active • engine output blocked";return@launch}
                 best=result.first;boardView.bestMove=if(boardView.showArrow)best else "";boardView.invalidate()
                 eval.text="EVAL   "+result.second;engineText.text="ENGINE   Best move: "+best.ifBlank{"none"}
                 status.text=if(best.isBlank()||best=="(none)")"No legal move." else "Analysis complete • arrow remains visible"
