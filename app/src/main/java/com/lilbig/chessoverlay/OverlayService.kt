@@ -72,6 +72,7 @@ class OverlayService : Service() {
         val dragTitle=label("♟  Chess Helper",19f,0xFF50DC69.toInt(),true)
         header.addView(dragTitle,LinearLayout.LayoutParams(0,dp(38),1f))
         dragTitle.setOnTouchListener(PanelDrag())
+        header.addView(label("▣",19f,Color.LTGRAY).apply { setPadding(dp(7),0,dp(7),0);setOnClickListener{setBoardOnly(!boardOnly)} })
         header.addView(label("−",25f,Color.LTGRAY).apply {
             setPadding(dp(9),0,dp(9),0);setOnClickListener{collapsePanel()}
         })
