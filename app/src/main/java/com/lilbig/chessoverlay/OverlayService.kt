@@ -3,539 +3,212 @@ package com.lilbig.chessoverlay
 import android.app.*
 import android.content.Intent
 import android.graphics.*
-import android.hardware.display.DisplayManager
-import android.media.ImageReader
-import android.media.projection.MediaProjection
-import android.media.projection.MediaProjectionManager
+import android.graphics.drawable.GradientDrawable
 import android.os.*
-import android.util.DisplayMetrics
 import android.view.*
-import android.widget.TextView
-import android.widget.Button
-import android.widget.LinearLayout
-import android.widget.ScrollView
-import android.view.WindowManager.LayoutParams.*
+import android.view.WindowManager
+import android.widget.*
 import androidx.core.app.NotificationCompat
+import com.github.bhlangonijr.chesslib.*
+import com.github.bhlangonijr.chesslib.move.Move
 import kotlinx.coroutines.*
 import java.io.*
-import java.net.URL
-import java.util.zip.ZipInputStream
+import java.util.Locale
 import kotlin.math.*
 
-enum class MoveClass(val label: String, val emoji: String, val argb: Int) {
-    BRILLIANT("Brilliant", "!!", 0xFF00C8FF.toInt()),
-    BEST("Best", "★", 0xFF4CB87A.toInt()),
-    GREAT("Great", "!", 0xFF4CB87A.toInt()),
-    GOOD("Good", "○", 0xFF90EE90.toInt()),
-    INACCURACY("Inaccuracy", "?!", 0xFFFFD700.toInt()),
-    MISTAKE("Mistake", "?", 0xFFFF8C00.toInt()),
-    BLUNDER("Blunder", "??", 0xFFFF3030.toInt()),
-}
-
-fun classify(cpLoss: Int, isBest: Boolean, isSac: Boolean): MoveClass = when {
-    isBest && isSac -> MoveClass.BRILLIANT
-    isBest -> MoveClass.BEST
-    cpLoss <= 10 -> MoveClass.GREAT
-    cpLoss <= 25 -> MoveClass.GOOD
-    cpLoss <= 50 -> MoveClass.INACCURACY
-    cpLoss <= 150 -> MoveClass.MISTAKE
-    else -> MoveClass.BLUNDER
-}
-
-class ArrowView(context: android.content.Context) : android.view.View(context) {
-    private var boardRect: RectF? = null
-    private var move: String? = null
-    private var cls: MoveClass? = null
-    private var flipped = false
-
-    private val fill = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
-    private val stroke = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE; strokeCap = Paint.Cap.ROUND }
-    private val shadow = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE; color = 0x55000000; strokeCap = Paint.Cap.ROUND }
-    private val txt = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.WHITE; textAlign = Paint.Align.CENTER; typeface = Typeface.DEFAULT_BOLD }
-
-    fun set(board: RectF, mv: String, c: MoveClass, fp: Boolean) { boardRect=board; move=mv; cls=c; flipped=fp; invalidate() }
-    fun clear() { boardRect=null; move=null; cls=null; invalidate() }
-
-    override fun onDraw(canvas: Canvas) {
-        val b = boardRect ?: return
-        val mv = move ?: return
-        val cw = b.width() / 8f
-        val ch = b.height() / 8f
-        val from = center(mv.substring(0, 2), b, cw, ch)
-        val to = center(mv.substring(2, 4), b, cw, ch)
-
-        // Match the bold, translucent analysis arrow shown in the reference:
-        // dark charcoal body, rounded shaft, and a wide triangular point.
-        val dx = to.x - from.x
-        val dy = to.y - from.y
-        val length = hypot(dx, dy)
-        if (length < 1f) return
-        val ux = dx / length
-        val uy = dy / length
-        val px = -uy
-        val py = ux
-
-        val shaftWidth = cw * 0.19f
-        val headLength = cw * 0.95f
-        val headHalfWidth = cw * 0.48f
-        val baseX = to.x - ux * headLength
-        val baseY = to.y - uy * headLength
-        val shaftEndX = baseX
-        val shaftEndY = baseY
-
-        val arrowPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = 0xAA20242B.toInt()
-            style = Paint.Style.STROKE
-            strokeWidth = shaftWidth
-            strokeCap = Paint.Cap.ROUND
-            strokeJoin = Paint.Join.ROUND
-        }
-        canvas.drawLine(from.x, from.y, shaftEndX, shaftEndY, arrowPaint)
-
-        val head = Path().apply {
-            moveTo(to.x, to.y)
-            lineTo(baseX + px * headHalfWidth, baseY + py * headHalfWidth)
-            lineTo(baseX - px * headHalfWidth, baseY - py * headHalfWidth)
-            close()
-        }
-        val headPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = 0xAA20242B.toInt()
-            style = Paint.Style.FILL
-        }
-        canvas.drawPath(head, headPaint)
-    }
-
-    private fun center(sq: String, b: RectF, cw: Float, ch: Float): PointF {
-        val f = sq[0]-'a'; val r = sq[1]-'1'
-        val col = if (flipped) 7-f else f
-        val row = if (flipped) r else 7-r
-        return PointF(b.left+col*cw+cw/2f, b.top+row*ch+ch/2f)
-    }
-    private fun squareRect(sq: String, b: RectF, cw: Float, ch: Float): RectF {
-        val c = center(sq,b,cw,ch)
-        return RectF(c.x-cw/2f,c.y-ch/2f,c.x+cw/2f,c.y+ch/2f)
-    }
-}
-
-object BoardFinder {
-    // Detect a centered 8x8 checkerboard independent of its palette.
-    // Search the likely phone-board area instead of assuming the board crosses screen midpoint.
-    fun find(bmp: Bitmap): RectF? {
-        val w = bmp.width
-        val h = bmp.height
-        val maxSide = min(w, h - 80)
-        val minSide = (w * 0.72f).toInt().coerceAtLeast(240)
-        if (maxSide < minSide) return null
-
-        var bestScore = 0.0
-        var best: RectF? = null
-        val step = 10
-        var side = minSide
-        while (side <= maxSide) {
-            val xMin = ((w - side) / 2 - w * 0.10f).toInt().coerceAtLeast(0)
-            val xMax = ((w - side) / 2 + w * 0.10f).toInt().coerceAtMost(w - side)
-            var x = xMin
-            while (x <= xMax) {
-                var y = (h * 0.12f).toInt()
-                val yMax = (h * 0.82f - side).toInt().coerceAtLeast(y)
-                while (y <= yMax) {
-                    val score = checkerScore(bmp, x, y, side)
-                    if (score > bestScore) {
-                        bestScore = score
-                        best = RectF(x.toFloat(), y.toFloat(), (x + side).toFloat(), (y + side).toFloat())
-                    }
-                    y += step
-                }
-                x += step
-            }
-            side += 8
-        }
-        return if (bestScore >= 13.0) best else null
-    }
-
-    private fun checkerScore(bmp: Bitmap, x: Int, y: Int, side: Int): Double {
-        val cell = side / 8f
-        val parity = Array(2) { DoubleArray(3) }
-        val parityCount = IntArray(2)
-        val variance = DoubleArray(2)
-        for (rank in 0..7) for (file in 0..7) {
-            val group = (rank + file) and 1
-            val cx = x + (file + 0.22f) * cell
-            val cy = y + (rank + 0.22f) * cell
-            val points = arrayOf(
-                bmp.getPixel(cx.toInt().coerceIn(0,bmp.width-1), cy.toInt().coerceIn(0,bmp.height-1)),
-                bmp.getPixel((x+(file+0.78f)*cell).toInt().coerceIn(0,bmp.width-1), cy.toInt().coerceIn(0,bmp.height-1)),
-                bmp.getPixel(cx.toInt().coerceIn(0,bmp.width-1), (y+(rank+0.78f)*cell).toInt().coerceIn(0,bmp.height-1)),
-                bmp.getPixel((x+(file+0.78f)*cell).toInt().coerceIn(0,bmp.width-1), (y+(rank+0.78f)*cell).toInt().coerceIn(0,bmp.height-1))
-            )
-            val rgb = DoubleArray(3)
-            for (p in points) {
-                rgb[0] += Color.red(p) / 4.0
-                rgb[1] += Color.green(p) / 4.0
-                rgb[2] += Color.blue(p) / 4.0
-            }
-            for (k in 0..2) parity[group][k] += rgb[k]
-            parityCount[group]++
-        }
-        for (g in 0..1) for (k in 0..2) parity[g][k] = parity[g][k] / parityCount[g]
-        val contrast = sqrt((0..2).sumOf { k ->
-            val d = parity[0][k] - parity[1][k]; d*d
-        })
-        // Checkerboard contrast is useful; reject near-uniform screen regions.
-        return contrast
-    }
-
-    fun isFlipped(bmp: Bitmap, board: RectF): Boolean {
-        // Chess.com normally exposes coordinates around the board. Without reliable
-        // orientation metadata, default to White at the bottom.
-        return false
-    }
-}
-data class EngineResult(val bestMove: String, val whiteScoreCp: Int, val mate: Int? = null)
-
-class Engine {
-    private lateinit var proc: java.lang.Process
-    private lateinit var w: BufferedWriter
-    private lateinit var r: BufferedReader
-
-    fun start(path: String) {
-        proc = ProcessBuilder(path).redirectErrorStream(true).start()
-        w = BufferedWriter(OutputStreamWriter(proc.outputStream))
-        r = BufferedReader(InputStreamReader(proc.inputStream))
-        cmd("uci"); await("uciok")
-        cmd("setoption name Hash value 32")
-        cmd("setoption name Threads value 2")
-        cmd("isready"); await("readyok")
-    }
-
-    fun analyze(fen: String, depth: Int = 15): EngineResult? {
-        cmd("position fen $fen")
-        cmd("go depth $depth")
-        var best: String? = null
-        var scoreCp: Int? = null
-        var mate: Int? = null
-        while (true) {
-            val line = r.readLine() ?: break
-            if (line.startsWith("info ") && (line.contains(" score cp ") || line.contains(" score mate "))) {
-                val tokens = line.split(Regex("\\s+"))
-                val scoreIndex = tokens.indexOf("score")
-                if (scoreIndex >= 0 && scoreIndex + 2 < tokens.size) {
-                    when (tokens[scoreIndex + 1]) {
-                        "cp" -> { scoreCp = tokens[scoreIndex + 2].toIntOrNull(); mate = null }
-                        "mate" -> { mate = tokens[scoreIndex + 2].toIntOrNull(); scoreCp = null }
-                    }
-                }
-            }
-            if (line.startsWith("bestmove ")) {
-                best = line.split(" ").getOrNull(1)
-                break
-            }
-        }
-        val move = best?.takeIf { it != "(none)" } ?: return null
-        val sideToMove = fen.split(" ").getOrNull(1) ?: "w"
-        val rawCp = scoreCp ?: (mate?.let { if (it > 0) 30000 else -30000 } ?: 0)
-        val whiteCp = if (sideToMove == "b") -rawCp else rawCp
-        return EngineResult(move, whiteCp, mate?.let { if (sideToMove == "b") -it else it })
-    }
-
-    fun stop() { try { cmd("quit"); proc.waitFor() } catch (_: Exception) {}; proc.destroy() }
-    private fun cmd(c: String) { w.write(c); w.newLine(); w.flush() }
-    private fun await(tok: String) { var l: String?; do { l=r.readLine() } while (l!=null && !l.startsWith(tok)) }
-    private fun readLines(): List<String> {
-        val out = mutableListOf<String>(); var l: String?
-        do { l=r.readLine(); if (l!=null) out.add(l) } while (l!=null && !l.startsWith("bestmove"))
-        return out
-    }
-}
-
 class OverlayService : Service() {
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
     private lateinit var wm: WindowManager
-    private lateinit var arrow: ArrowView
-    private var mp: MediaProjection? = null
-    private var vd: android.hardware.display.VirtualDisplay? = null
-    private var ir: ImageReader? = null
-    private val engine = Engine()
-    @Volatile private var engineEnabled = false
-    @Volatile private var engineReady = false
-    @Volatile private var engineStatus = "Engine: preparing Stockfish…"
-    @Volatile private var arrowsEnabled = true
-    @Volatile private var showEvaluation = true
-    @Volatile private var overlayVisible = true
-    @Volatile private var engineDepth = 15
-    private lateinit var launcher: TextView
     private lateinit var panel: LinearLayout
-    private lateinit var panelContainer: ScrollView
-    private lateinit var panelStatus: TextView
-    private lateinit var evaluationView: TextView
-    private var lastFen = ""
-    private var sw = 0; private var sh = 0; private var dpi = 0
+    private lateinit var boardView: StudyBoardView
+    private lateinit var status: TextView
+    private lateinit var eval: TextView
+    private lateinit var engineText: TextView
+    private lateinit var lp: WindowManager.LayoutParams
+    private var flipped = false
+    private var ready = false
+    private var busy = false
+    private var proc: Process? = null
+    private var reader: BufferedReader? = null
+    private var writer: BufferedWriter? = null
+    private var best = ""
+    private val sf by lazy { File(applicationInfo.nativeLibraryDir, "libstockfish.so") }
 
     override fun onCreate() {
         super.onCreate()
+        startForeground(7, notification())
         wm = getSystemService(WINDOW_SERVICE) as WindowManager
-        val dm = DisplayMetrics()
-        @Suppress("DEPRECATION") wm.defaultDisplay.getRealMetrics(dm)
-        sw = dm.widthPixels; sh = dm.heightPixels; dpi = dm.densityDpi
-        arrow = ArrowView(this)
-        wm.addView(arrow, WindowManager.LayoutParams(
-            sw, sh,
+        buildPanel()
+        lp = WindowManager.LayoutParams(dp(330), WindowManager.LayoutParams.WRAP_CONTENT,
             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
-            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
-                WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
-                WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
-            PixelFormat.TRANSLUCENT
-        ).apply { gravity = Gravity.TOP or Gravity.START })
-        evaluationView = TextView(this).apply {
-            text = "Eval: waiting"
-            textSize = 16f
-            setTextColor(Color.WHITE)
-            setPadding(18, 10, 18, 10)
-            background = android.graphics.drawable.GradientDrawable().apply {
-                setColor(0xDD20242B.toInt()); cornerRadius = 18f
-            }
-            visibility = View.GONE
-        }
-        wm.addView(evaluationView, WindowManager.LayoutParams(
-            WindowManager.LayoutParams.WRAP_CONTENT,
-            WindowManager.LayoutParams.WRAP_CONTENT,
-            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
-            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE,
-            PixelFormat.TRANSLUCENT
-        ).apply { gravity = Gravity.TOP or Gravity.START; x = 18; y = 70 })
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+            PixelFormat.TRANSLUCENT).apply { gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL; y = dp(58) }
+        wm.addView(panel, lp)
+        startEngine()
+    }
 
-        // Compact floating launcher remains available when the full overlay is hidden.
-        launcher = TextView(this).apply {
-            text = "♟"
-            textSize = 22f
-            setTextColor(Color.WHITE)
-            gravity = Gravity.CENTER
-            setPadding(18, 10, 18, 10)
-            background = android.graphics.drawable.GradientDrawable().apply {
-                setColor(0xEE20283A.toInt()); cornerRadius = 48f
-                setStroke(2, 0xFF00C8FF.toInt())
-            }
-            setOnClickListener { togglePanel() }
-        }
-        wm.addView(launcher, WindowManager.LayoutParams(
-            WindowManager.LayoutParams.WRAP_CONTENT,
-            WindowManager.LayoutParams.WRAP_CONTENT,
-            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
-            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
-            PixelFormat.TRANSLUCENT
-        ).apply { gravity = Gravity.TOP or Gravity.END; x = 20; y = 120 })
-
+    private fun buildPanel() {
         panel = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(18, 16, 18, 16)
-            background = android.graphics.drawable.GradientDrawable().apply {
-                setColor(0xF2222633.toInt()); cornerRadius = 24f
-                setStroke(2, 0xFF46536B.toInt())
+            orientation = LinearLayout.VERTICAL; setPadding(dp(10),dp(8),dp(10),dp(10))
+            background = GradientDrawable().apply { setColor(0xF2222633.toInt()); cornerRadius=dp(18).toFloat(); setStroke(dp(1),0xFF46536B.toInt()) }
+        }
+        val header = LinearLayout(this).apply { gravity=Gravity.CENTER_VERTICAL; setOnTouchListener(Drag()) }
+        header.addView(label("♟  Chess Helper",19f,0xFF50DC69.toInt(),true),LinearLayout.LayoutParams(0,dp(38),1f))
+        header.addView(label("—",22f,Color.LTGRAY).apply { setPadding(dp(8),0,dp(8),0); setOnClickListener { panel.visibility=View.GONE } })
+        header.addView(label("×",24f,Color.LTGRAY).apply { setPadding(dp(8),0,dp(4),0); setOnClickListener { stopSelf() } })
+        panel.addView(header)
+        status=label("Move pieces on this offline study board.",13f,Color.WHITE)
+        panel.addView(status)
+        boardView=StudyBoardView(this) {
+            best=""; eval.text="EVAL   —"; engineText.text="ENGINE   Position changed"
+            status.text="Position updated • Tap THINK to analyze"
+        }
+        panel.addView(boardView,LinearLayout.LayoutParams(-1,dp(308)).apply { topMargin=dp(5); bottomMargin=dp(6) })
+        val rows=LinearLayout(this).apply { orientation=LinearLayout.VERTICAL }
+        fun row()=LinearLayout(this).apply { orientation=LinearLayout.HORIZONTAL; rows.addView(this) }
+        fun btn(r:LinearLayout,t:String,fn:(Button)->Unit) {
+            val b=Button(this).apply { text=t; isAllCaps=false; textSize=11f; setTextColor(Color.WHITE)
+                background=GradientDrawable().apply { setColor(0xFF374154.toInt()); cornerRadius=dp(10).toFloat() }
+                setOnClickListener { fn(this) } }
+            r.addView(b,LinearLayout.LayoutParams(0,dp(46),1f).apply { setMargins(dp(2),dp(2),dp(2),dp(2)) })
+        }
+        var r=row()
+        btn(r,"Undo move"){boardView.undo();clear()}
+        btn(r,"New game"){boardView.reset();clear()}
+        r=row()
+        btn(r,"My pieces: White"){flipped=!flipped;boardView.flipped=flipped;boardView.invalidate();it.text=if(flipped)"My pieces: Black" else "My pieces: White"}
+        btn(r,"Think"){analyze()}
+        r=row()
+        btn(r,"Best arrow: ON"){boardView.showArrow=!boardView.showArrow;boardView.bestMove=if(boardView.showArrow)best else "";boardView.invalidate();it.text=if(boardView.showArrow)"Best arrow: ON" else "Best arrow: OFF"}
+        btn(r,"Reset view"){lp.x=0;lp.y=dp(58);wm.updateViewLayout(panel,lp);flipped=false;boardView.flipped=false;boardView.invalidate()}
+        panel.addView(rows)
+        eval=label("EVAL   —",14f,0xFFB4E1CC.toInt());panel.addView(eval)
+        engineText=label("ENGINE   Starting Stockfish…",12f,Color.WHITE);panel.addView(engineText)
+        panel.addView(label("Offline study panel • no screen reading",10f,Color.LTGRAY).apply{gravity=Gravity.CENTER})
+    }
+
+    private fun label(s:String,size:Float,color:Int,bold:Boolean=false)=TextView(this).apply {
+        text=s;textSize=size;setTextColor(color);setPadding(dp(4),dp(4),dp(4),dp(4))
+        if(bold)typeface=Typeface.DEFAULT_BOLD
+    }
+    private fun clear(){best="";eval.text="EVAL   —";engineText.text="ENGINE   Ready when you are";boardView.bestMove="";boardView.invalidate()}
+    private fun startEngine(){scope.launch{
+        try {
+            val trio=withContext(Dispatchers.IO){
+                if(!sf.exists()||!sf.canExecute())throw IOException("Stockfish missing; reinstall APK")
+                val p=ProcessBuilder(sf.absolutePath).redirectErrorStream(true).start()
+                val w=BufferedWriter(OutputStreamWriter(p.outputStream));val r=BufferedReader(InputStreamReader(p.inputStream))
+                fun send(s:String){w.write(s);w.newLine();w.flush()}
+                send("uci");while(r.readLine()?.startsWith("uciok")!=true){}
+                send("setoption name Threads value 2");send("setoption name Hash value 64")
+                send("isready");while(r.readLine()?.startsWith("readyok")!=true){}
+                Triple(p,w,r)
             }
+            proc=trio.first;writer=trio.second;reader=trio.third;ready=true;engineText.text="ENGINE   Stockfish ready"
+        }catch(e:Exception){engineText.text="ENGINE   "+(e.message?: "Failed to start")}
+    }}
+    private fun analyze(){
+        if(!ready){status.text="Stockfish is still starting…";return};if(busy)return
+        busy=true;status.text="Analyzing study position…";val fen=boardView.fen()
+        scope.launch{
+            try{
+                val result=withContext(Dispatchers.IO){synchronized(this@OverlayService){
+                    val w=writer?:error("Engine unavailable");val r=reader?:error("Engine unavailable")
+                    w.write("position fen "+fen+"\ngo depth 14\n");w.flush()
+                    var bm="";var score="—"
+                    while(true){val line=r.readLine()?:break
+                        if(line.startsWith("info ")&&line.contains(" score cp ")){
+                            val t=line.split(Regex("\\s+"));val ix=t.indexOf("score")
+                            if(ix>=0&&ix+2<t.size){val cp=t[ix+2].toIntOrNull();if(cp!=null){
+                                val white=if(fen.split(" ").getOrNull(1)=="b")-cp else cp
+                                score=String.format(Locale.US,"%+.2f",white/100.0)
+                            }}
+                        }
+                        if(line.startsWith("bestmove ")){bm=line.split(" ").getOrNull(1)?:"";break}
+                    };Pair(bm,score)
+                }}
+                best=result.first;boardView.bestMove=if(boardView.showArrow)best else "";boardView.invalidate()
+                eval.text="EVAL   "+result.second;engineText.text="ENGINE   Best move: "+best.ifBlank{"none"}
+                status.text=if(best.isBlank()||best=="(none)")"No legal move." else "Analysis complete • arrow stays until position changes"
+            }catch(e:Exception){status.text="Analysis failed: "+(e.message?:"unknown")}
+            finally{busy=false}
         }
-        panelContainer = ScrollView(this).apply { addView(panel) }
-        addPanelLabel("CHESS OVERLAY")
-        panelStatus = addPanelLabel("Board: waiting for screen capture")
-        addPanelButton("ENGINE  •  OFF") {
-            engineEnabled = !engineEnabled
-            updatePanel()
-            if (!engineEnabled) arrow.clear()
+    }
+    private inner class Drag:View.OnTouchListener{
+        var sx=0f;var sy=0f;var ox=0;var oy=0
+        override fun onTouch(v:View,e:MotionEvent):Boolean{
+            when(e.action){
+                MotionEvent.ACTION_DOWN->{sx=e.rawX;sy=e.rawY;ox=lp.x;oy=lp.y;return true}
+                MotionEvent.ACTION_MOVE->{lp.x=ox+(e.rawX-sx).toInt();lp.y=oy+(e.rawY-sy).toInt();runCatching{wm.updateViewLayout(panel,lp)};return true}
+            };return true
         }
-        addPanelButton("ARROWS  •  ON") {
-            arrowsEnabled = !arrowsEnabled
-            if (!arrowsEnabled) arrow.clear()
-            updatePanel()
+    }
+    private fun notification():Notification{
+        val nm=getSystemService(NOTIFICATION_SERVICE) as NotificationManager
+        nm.createNotificationChannel(NotificationChannel("study_overlay","Study overlay",NotificationManager.IMPORTANCE_LOW))
+        return NotificationCompat.Builder(this,"study_overlay").setSmallIcon(android.R.drawable.ic_menu_view)
+            .setContentTitle("Chess study overlay active").setContentText("Manual offline analysis board").setOngoing(true).build()
+    }
+    private fun dp(v:Int)=(v*resources.displayMetrics.density).toInt()
+    override fun onDestroy(){
+        runCatching{writer?.write("quit\n");writer?.flush()};proc?.destroy()
+        if(::panel.isInitialized&&panel.isAttachedToWindow)wm.removeView(panel)
+        scope.cancel();super.onDestroy()
+    }
+    override fun onBind(intent:Intent?)=null
+}
+
+private class StudyBoardView(context:android.content.Context,private val changed:(String)->Unit):View(context){
+    private val game=Board()
+    private val history=mutableListOf<String>()
+    var flipped=false;var showArrow=true;var bestMove=""
+    private var selected:Square?=null
+    private var targets=emptySet<Square>()
+    private val light=0xFFEFE0C2.toInt();private val dark=0xFF78917D.toInt()
+    private val piecePaint=Paint(Paint.ANTI_ALIAS_FLAG).apply{textAlign=Paint.Align.CENTER;typeface=Typeface.create("serif",Typeface.NORMAL)}
+    fun fen()=game.fen
+    fun reset(){game.loadFromFen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1");history.clear();selected=null;targets=emptySet();bestMove="";invalidate();changed(game.fen)}
+    fun undo(){if(history.isNotEmpty()){game.undoMove();history.removeAt(history.lastIndex);selected=null;targets=emptySet();bestMove="";invalidate();changed(game.fen)}}
+    private fun square(file:Int,rank:Int)=Square.valueOf(("" + ('a'+file) + rank).uppercase())
+    override fun onDraw(c:Canvas){
+        super.onDraw(c);val size=min(width.toFloat(),height.toFloat());val l=(width-size)/2;val t=(height-size)/2;val cell=size/8
+        for(vy in 0..7)for(vx in 0..7){
+            val f=if(flipped)7-vx else vx;val r=if(flipped)vy+1 else 8-vy;val sq=square(f,r)
+            val rect=RectF(l+vx*cell,t+vy*cell,l+(vx+1)*cell,t+(vy+1)*cell)
+            val pale=((f+r)and 1)==1;c.drawRect(rect,Paint().apply{color=if(pale)light else dark})
+            if(sq==selected)c.drawRect(rect,Paint().apply{color=0x6675B7F2})
+            val p=game.getPiece(sq)
+            if(p!=Piece.NONE){piecePaint.textSize=cell*.78f;piecePaint.color=if(p.pieceSide==Side.WHITE)Color.WHITE else 0xFF20242A.toInt()
+                piecePaint.setShadowLayer(2f,0f,1f,0x66000000);c.drawText(p.fanSymbol,rect.centerX(),rect.centerY()+cell*.27f,piecePaint);piecePaint.clearShadowLayer()}
+            if(targets.contains(sq)){val mark=Paint(Paint.ANTI_ALIAS_FLAG).apply{color=0x88302D26.toInt();style=if(p==Piece.NONE)Paint.Style.FILL else Paint.Style.STROKE;strokeWidth=cell*.07f}
+                c.drawCircle(rect.centerX(),rect.centerY(),if(p==Piece.NONE)cell*.12f else cell*.43f,mark)}
+            val coord=Paint(Paint.ANTI_ALIAS_FLAG).apply{color=if(pale)dark else light;textSize=cell*.16f}
+            if(f==0)c.drawText(r.toString(),rect.left+cell*.1f,rect.top+cell*.18f,coord)
+            if(r==1)c.drawText(('a'+f).toString(),rect.right-cell*.12f,rect.bottom-cell*.04f,coord)
         }
-        addPanelButton("EVALUATION  •  ON") {
-            showEvaluation = !showEvaluation
-            updatePanel()
-        }
-        addPanelButton("ENGINE DEPTH  •  15") {
-            engineDepth = when (engineDepth) { 10 -> 15; 15 -> 18; else -> 10 }
-            updatePanel()
-        }
-        addPanelButton("HIDE FULL OVERLAY") {
-            overlayVisible = false
-            arrow.clear()
-            panelContainer.visibility = View.GONE
-            launcher.text = "♟"
-            launcher.contentDescription = "Restore ChessOverlay"
-        }
-        addPanelButton("CLOSE MENU") { panelContainer.visibility = View.GONE }
-        wm.addView(panelContainer, WindowManager.LayoutParams(
-            (sw * 0.72f).toInt().coerceAtMost(620),
-            WindowManager.LayoutParams.WRAP_CONTENT,
-            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
-            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
-                WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
-            PixelFormat.TRANSLUCENT
-        ).apply { gravity = Gravity.TOP or Gravity.END; x = 20; y = 190 })
-        panelContainer.visibility = View.GONE
-        startForeground(1, buildNotif())
-        scope.launch {
-            try {
-                engineStatus = "Engine: downloading Stockfish…"
-                val sf = ensureSf() ?: throw IOException("No compatible Stockfish binary found")
-                engineStatus = "Engine: starting Stockfish…"
-                engine.start(sf)
-                engineReady = true
-                engineStatus = "Engine: ready"
-            } catch (e: Exception) {
-                engineReady = false
-                engineStatus = "Engine error: ${e.message ?: e.javaClass.simpleName}"
+        if(showArrow&&bestMove.length>=4)drawArrow(c,l,t,cell)
+    }
+    private fun drawArrow(c:Canvas,l:Float,t:Float,cell:Float){
+        fun center(s:String):PointF{val f=s[0]-'a';val r=s[1]-'1';val x=if(flipped)7-f else f;val y=if(flipped)r else 7-r;return PointF(l+(x+.5f)*cell,t+(y+.5f)*cell)}
+        val a=center(bestMove.substring(0,2));val b=center(bestMove.substring(2,4));val dx=b.x-a.x;val dy=b.y-a.y;val len=hypot(dx,dy);if(len<1)return
+        val ux=dx/len;val uy=dy/len;val px=-uy;val py=ux;val bx=b.x-ux*cell*.8f;val by=b.y-uy*cell*.8f
+        val paint=Paint(Paint.ANTI_ALIAS_FLAG).apply{color=0xAA20242B.toInt();strokeWidth=cell*.18f;strokeCap=Paint.Cap.ROUND}
+        c.drawLine(a.x,a.y,bx,by,paint);val path=Path().apply{moveTo(b.x,b.y);lineTo(bx+px*cell*.38f,by+py*cell*.38f);lineTo(bx-px*cell*.38f,by-py*cell*.38f);close()}
+        c.drawPath(path,Paint(Paint.ANTI_ALIAS_FLAG).apply{color=paint.color})
+    }
+    override fun onTouchEvent(e:MotionEvent):Boolean{
+        if(e.action!=MotionEvent.ACTION_UP)return true
+        val size=min(width.toFloat(),height.toFloat());val l=(width-size)/2;val t=(height-size)/2;val cell=size/8
+        val vx=((e.x-l)/cell).toInt();val vy=((e.y-t)/cell).toInt();if(vx !in 0..7||vy !in 0..7)return true
+        val f=if(flipped)7-vx else vx;val r=if(flipped)vy+1 else 8-vy;val to=square(f,r);val p=game.getPiece(to);val moves=game.legalMoves()
+        if(selected==null){if(p!=Piece.NONE&&p.pieceSide==game.sideToMove){selected=to;targets=moves.filter{it.from==to}.map{it.to}.toSet()}}
+        else{
+            val from=selected!!;val options=moves.filter{it.from==from&&it.to==to}
+            if(options.isNotEmpty()){
+                val chosen=options.firstOrNull{it.promotion==Piece.WHITE_QUEEN||it.promotion==Piece.BLACK_QUEEN}?:options.first()
+                if(game.doMove(chosen)){history.add(chosen.toString());selected=null;targets=emptySet();bestMove="";invalidate();changed(game.fen);return true}
             }
-            withContext(Dispatchers.Main) { if (::panelStatus.isInitialized) updatePanel() }
-        }
+            if(p!=Piece.NONE&&p.pieceSide==game.sideToMove){selected=to;targets=moves.filter{it.from==to}.map{it.to}.toSet()}else{selected=null;targets=emptySet()}
+        };invalidate();return true
     }
-
-    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        val code = intent?.getIntExtra("code",-1) ?: return START_NOT_STICKY
-        val data = if (Build.VERSION.SDK_INT >= 33)
-            intent.getParcelableExtra("data", Intent::class.java)
-        else @Suppress("DEPRECATION") intent.getParcelableExtra("data")
-        data ?: return START_NOT_STICKY
-        mp = (getSystemService(MEDIA_PROJECTION_SERVICE) as MediaProjectionManager).getMediaProjection(code,data)
-        mp?.registerCallback(object : MediaProjection.Callback() { override fun onStop() { stopSelf() } }, Handler(Looper.getMainLooper()))
-        ir = ImageReader.newInstance(sw,sh,PixelFormat.RGBA_8888,2)
-        vd = mp!!.createVirtualDisplay("cc",sw,sh,dpi,DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,ir!!.surface,null,null)
-        scope.launch { while (isActive) { runCatching { tick() }; delay(300) } }
-        return START_NOT_STICKY
-    }
-
-    private suspend fun tick() {
-        val img = ir?.acquireLatestImage() ?: return
-        val bmp = try {
-            val pl = img.planes[0]
-            val b = Bitmap.createBitmap(pl.rowStride/pl.pixelStride,sh,Bitmap.Config.ARGB_8888)
-            b.copyPixelsFromBuffer(pl.buffer)
-            if (b.width != sw) Bitmap.createBitmap(b,0,0,sw,sh) else b
-        } finally { img.close() }
-        val board = BoardFinder.find(bmp) ?: run { withContext(Dispatchers.Main) { arrow.clear() }; return }
-        val flipped = BoardFinder.isFlipped(bmp,board)
-        if (!engineEnabled || !overlayVisible || !engineReady) {
-            withContext(Dispatchers.Main) {
-                arrow.clear()
-                evaluationView.visibility = View.GONE
-            }
-            return
-        }
-        val fen = buildFen(bmp,board)
-        if (fen == lastFen) return
-        lastFen = fen
-        val result = engine.analyze(fen, engineDepth)
-        withContext(Dispatchers.Main) {
-            if (result == null) {
-                arrow.clear()
-                evaluationView.text = "Eval: unavailable"
-            } else {
-                if (arrowsEnabled) arrow.set(board,result.bestMove,MoveClass.BEST,flipped)
-                else arrow.clear()
-                val score = result.whiteScoreCp / 100.0
-                evaluationView.text = result.mate?.let { "Mate: ${if (it > 0) "+" else ""}$it" }
-                    ?: "Eval: ${if (score > 0) "+" else ""}%.2f".format(score)
-                evaluationView.visibility = if (showEvaluation) View.VISIBLE else View.GONE
-            }
-        }
-    }
-
-    private fun buildFen(bmp: Bitmap, board: RectF): String {
-        val cw = board.width()/8f; val ch = board.height()/8f
-        val sb = StringBuilder()
-        for (rank in 0..7) {
-            var empty = 0
-            for (file in 0..7) {
-                val cx = (board.left+file*cw+cw/2f).toInt().coerceIn(0,bmp.width-1)
-                val cy = (board.top+rank*ch+ch/2f).toInt().coerceIn(0,bmp.height-1)
-                var tot = 0; var cnt = 0
-                for (dx in -2..2) for (dy in -2..2) {
-                    val px = bmp.getPixel((cx+dx).coerceIn(0,bmp.width-1),(cy+dy).coerceIn(0,bmp.height-1))
-                    tot += (Color.red(px)+Color.green(px)+Color.blue(px))/3; cnt++
-                }
-                val avg = tot/cnt
-                val pc = when { avg > 220 -> 'Q'; avg < 60 -> 'q'; else -> null }
-                if (pc == null) empty++ else { if (empty>0) { sb.append(empty); empty=0 }; sb.append(pc) }
-            }
-            if (empty>0) sb.append(empty)
-            if (rank<7) sb.append('/')
-        }
-        sb.append(" w - - 0 1")
-        return sb.toString()
-    }
-
-    private fun ensureSf(): String? {
-        // Android blocks execution of downloaded binaries from writable app-data
-        // directories on many modern devices (SELinux / noexec). The build
-        // packages Stockfish as a native library so PackageManager extracts it
-        // into nativeLibraryDir, which is the supported executable location.
-        val binary = File(applicationInfo.nativeLibraryDir, "libstockfish.so")
-        if (!binary.isFile || binary.length() < 500_000) {
-            throw IOException("Packaged Stockfish is missing for this CPU. Reinstall the latest APK.")
-        }
-        if (!binary.canExecute()) {
-            throw IOException("Android did not mark the packaged Stockfish executable. Reinstall the latest APK.")
-        }
-        return binary.absolutePath
-    }
-
-    private fun addPanelLabel(value: String): TextView {
-        return TextView(this).apply {
-            text = value; textSize = 15f; setTextColor(Color.WHITE)
-            typeface = Typeface.DEFAULT_BOLD; setPadding(8, 10, 8, 10)
-            panel.addView(this)
-        }
-    }
-
-    private fun addPanelButton(label: String, action: () -> Unit) {
-        val b = Button(this).apply {
-            text = label; isAllCaps = false; textSize = 13f
-            setOnClickListener { action() }
-        }
-        panel.addView(b, LinearLayout.LayoutParams(
-            LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT
-        ))
-    }
-
-    private fun togglePanel() {
-        if (!overlayVisible) {
-            overlayVisible = true
-            launcher.text = "♟"
-        }
-        panelContainer.visibility = if (panelContainer.visibility == View.VISIBLE) View.GONE else View.VISIBLE
-        updatePanel()
-    }
-
-    private fun updatePanel() {
-        if (!::panel.isInitialized) return
-        val buttons = (0 until panel.childCount).mapNotNull { panel.getChildAt(it) as? Button }
-        if (buttons.size >= 5) {
-            buttons[0].text = "ENGINE  •  " + if (engineEnabled) "ON" else "OFF"
-            buttons[1].text = "ARROWS  •  " + if (arrowsEnabled) "ON" else "OFF"
-            buttons[2].text = "EVALUATION  •  " + if (showEvaluation) "ON" else "OFF"
-            buttons[3].text = "ENGINE DEPTH  •  $engineDepth"
-        }
-        if (::panelStatus.isInitialized) {
-            panelStatus.text = if (engineReady) "Engine: ready • Board recognition: experimental" else engineStatus
-        }
-    }
-
-    private fun buildNotif(): Notification {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O)
-            (getSystemService(NOTIFICATION_SERVICE) as NotificationManager)
-                .createNotificationChannel(NotificationChannel("co","Chess Overlay",NotificationManager.IMPORTANCE_LOW))
-        return NotificationCompat.Builder(this,"co")
-            .setContentTitle("ChessOverlay active")
-            .setContentText("Analyzing chess.com...")
-            .setSmallIcon(android.R.drawable.ic_menu_view)
-            .setOngoing(true).build()
-    }
-
-    override fun onDestroy() {
-        scope.cancel(); vd?.release(); ir?.close(); mp?.stop()
-        if (arrow.isAttachedToWindow) wm.removeView(arrow)
-        if (::evaluationView.isInitialized && evaluationView.isAttachedToWindow) wm.removeView(evaluationView)
-        if (::launcher.isInitialized && launcher.isAttachedToWindow) wm.removeView(launcher)
-        if (::panelContainer.isInitialized && panelContainer.isAttachedToWindow) wm.removeView(panelContainer)
-        engine.stop(); super.onDestroy()
-    }
-    override fun onBind(i: Intent?) = null
 }
