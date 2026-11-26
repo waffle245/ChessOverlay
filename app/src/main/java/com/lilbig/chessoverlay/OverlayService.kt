@@ -28,7 +28,7 @@ class OverlayService : Service() {
     private lateinit var logoLp: WindowManager.LayoutParams
     private lateinit var colorButton: Button
     private var blackAtBottom = false
-    private var scale = 1.0f
+    private var scale = 0.78f
     private var ready = false
     private var busy = false
     private var proc: java.lang.Process? = null
@@ -42,7 +42,7 @@ class OverlayService : Service() {
         startForeground(7, notification())
         wm = getSystemService(WINDOW_SERVICE) as WindowManager
         buildPanel()
-        lp = WindowManager.LayoutParams(dp(330), WindowManager.LayoutParams.WRAP_CONTENT,
+        lp = WindowManager.LayoutParams(dp((300*scale).toInt()), WindowManager.LayoutParams.WRAP_CONTENT,
             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
             PixelFormat.TRANSLUCENT).apply { gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL; y = dp(58) }
@@ -82,7 +82,7 @@ class OverlayService : Service() {
             best=""; eval.text="EVAL   —"; engineText.text="ENGINE   Position changed"
             status.text="Position updated • Tap THINK to analyze"
         }
-        panel.addView(boardView,LinearLayout.LayoutParams(-1,dp(308)).apply { topMargin=dp(5); bottomMargin=dp(6) })
+        panel.addView(boardView,LinearLayout.LayoutParams(-1,dp((280*scale).toInt())).apply { topMargin=dp(4); bottomMargin=dp(5) })
         val rows=LinearLayout(this).apply { orientation=LinearLayout.VERTICAL }
         fun row()=LinearLayout(this).apply { orientation=LinearLayout.HORIZONTAL; rows.addView(this) }
         fun btn(r:LinearLayout,t:String,fn:(Button)->Unit):Button {
@@ -99,8 +99,17 @@ class OverlayService : Service() {
         colorButton=btn(r,"My pieces: White"){blackAtBottom=!blackAtBottom;boardView.flipped=blackAtBottom;boardView.invalidate();it.text=if(blackAtBottom)"My pieces: Black" else "My pieces: White"}
         btn(r,"Think"){analyze()}
         r=row()
-        btn(r,"− Size"){changeScale(-0.1f)}
-        btn(r,"+ Size"){changeScale(0.1f)}
+        val sizeLabel=label("Board size",11f,Color.LTGRAY)
+        r.addView(sizeLabel,LinearLayout.LayoutParams(dp(72),dp(42)))
+        val sizeSlider=SeekBar(this).apply {
+            max=100;progress=51
+            setOnSeekBarChangeListener(object:SeekBar.OnSeekBarChangeListener{
+                override fun onProgressChanged(seekBar:SeekBar?,progress:Int,fromUser:Boolean){changeScale(.55f+(progress/100f)*.45f)}
+                override fun onStartTrackingTouch(seekBar:SeekBar?){}
+                override fun onStopTrackingTouch(seekBar:SeekBar?){}
+            })
+        }
+        r.addView(sizeSlider,LinearLayout.LayoutParams(0,dp(42),1f))
         r=row()
         btn(r,"Best arrow: ON"){boardView.showArrow=!boardView.showArrow;boardView.bestMove=if(boardView.showArrow)best else "";boardView.invalidate();it.text=if(boardView.showArrow)"Best arrow: ON" else "Best arrow: OFF"}
         btn(r,"Reset view"){lp.x=0;lp.y=dp(58);wm.updateViewLayout(panel,lp);changeScale(0f)}
@@ -110,11 +119,11 @@ class OverlayService : Service() {
         panel.addView(label("Offline study board",10f,Color.LTGRAY).apply{gravity=Gravity.CENTER})
     }
 
-    private fun changeScale(delta:Float) {
-        scale=(if(delta==0f)1f else (scale+delta).coerceIn(.65f,1.25f))
-        lp.width=dp((330*scale).toInt())
-        boardView.layoutParams=boardView.layoutParams.apply { height=dp((308*scale).toInt()) }
-        panel.setPadding(dp((10*scale).toInt()),dp((8*scale).toInt()),dp((10*scale).toInt()),dp((10*scale).toInt()))
+    private fun changeScale(value:Float) {
+        scale=value.coerceIn(.55f,1.0f)
+        lp.width=dp((300*scale).toInt())
+        boardView.layoutParams=boardView.layoutParams.apply { height=dp((280*scale).toInt()) }
+        panel.setPadding(dp(8),dp(6),dp(8),dp(8))
         if(panel.isAttachedToWindow)wm.updateViewLayout(panel,lp)
     }
     private fun collapsePanel() {
@@ -212,12 +221,19 @@ private class StudyBoardView(context:android.content.Context,private val changed
     var flipped=false;var showArrow=true;var bestMove=""
     private var selected:Square?=null
     private var targets=emptySet<Square>()
-    private val light=0xFFEEF0D2.toInt();private val dark=0xFF789653.toInt()
+    // Match the screenshot's sage-green / pale-cream board. a1 is pale, b1 is green.
+    private val light=0xFFEEF0D2.toInt()
+    private val dark=0xFF789653.toInt()
+    // Use solid chess silhouettes for both sides; paint white pieces white rather than using hollow white-piece glyphs.
     private val glyphs=mapOf(
-        Piece.WHITE_KING to "♔",Piece.WHITE_QUEEN to "♕",Piece.WHITE_ROOK to "♖",Piece.WHITE_BISHOP to "♗",Piece.WHITE_KNIGHT to "♘",Piece.WHITE_PAWN to "♙",
-        Piece.BLACK_KING to "♚",Piece.BLACK_QUEEN to "♛",Piece.BLACK_ROOK to "♜",Piece.BLACK_BISHOP to "♝",Piece.BLACK_KNIGHT to "♞",Piece.BLACK_PAWN to "♟"
+        Piece.WHITE_KING to "♚",Piece.BLACK_KING to "♚",
+        Piece.WHITE_QUEEN to "♛",Piece.BLACK_QUEEN to "♛",
+        Piece.WHITE_ROOK to "♜",Piece.BLACK_ROOK to "♜",
+        Piece.WHITE_BISHOP to "♝",Piece.BLACK_BISHOP to "♝",
+        Piece.WHITE_KNIGHT to "♞",Piece.BLACK_KNIGHT to "♞",
+        Piece.WHITE_PAWN to "♟",Piece.BLACK_PAWN to "♟"
     )
-    private val fill=Paint(Paint.ANTI_ALIAS_FLAG).apply{textAlign=Paint.Align.CENTER;typeface=Typeface.create("serif",Typeface.BOLD)}
+    private val fill=Paint(Paint.ANTI_ALIAS_FLAG).apply{textAlign=Paint.Align.CENTER;typeface=Typeface.create("sans-serif",Typeface.NORMAL)}
     private val outline=Paint(Paint.ANTI_ALIAS_FLAG).apply{textAlign=Paint.Align.CENTER;typeface=Typeface.create("serif",Typeface.BOLD);style=Paint.Style.STROKE;strokeJoin=Paint.Join.ROUND;strokeCap=Paint.Cap.ROUND}
     fun fen()=game.fen
     fun reset(){game.loadFromFen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1");history.clear();selected=null;targets=emptySet();bestMove="";invalidate();changed(game.fen)}
@@ -234,11 +250,11 @@ private class StudyBoardView(context:android.content.Context,private val changed
             if(p!=Piece.NONE){
                 val symbol=glyphs[p]?:p.fanSymbol
                 val base=cell*.83f;val y=rect.centerY()+base*.34f
-                outline.textSize=base;outline.strokeWidth=cell*.055f
+                outline.textSize=base;outline.strokeWidth=cell*.045f
                 fill.textSize=base
-                if(p.pieceSide==Side.WHITE){outline.color=0xFF70746D.toInt();fill.color=0xFFFFFEF7.toInt()}
-                else{outline.color=0xFF22251F.toInt();fill.color=0xFF4B4D50.toInt()}
-                c.drawText(symbol,rect.centerX(),y,outline);c.drawText(symbol,rect.centerX(),y,fill)
+                if(p.pieceSide==Side.WHITE){outline.color=0xFF6C716A.toInt();fill.color=0xFFFFFEF7.toInt()}
+                else{outline.color=0xFF171B16.toInt();fill.color=0xFF45494B.toInt()}
+                c.drawText(symbol,rect.centerX(),y,fill);c.drawText(symbol,rect.centerX(),y,outline)
             }
             if(targets.contains(sq)){val mark=Paint(Paint.ANTI_ALIAS_FLAG).apply{color=0x88302D26.toInt();style=if(p==Piece.NONE)Paint.Style.FILL else Paint.Style.STROKE;strokeWidth=cell*.07f}
                 c.drawCircle(rect.centerX(),rect.centerY(),if(p==Piece.NONE)cell*.12f else cell*.43f,mark)}
