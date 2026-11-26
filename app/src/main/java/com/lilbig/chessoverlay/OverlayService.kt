@@ -10,10 +10,8 @@ import android.view.WindowManager
 import android.widget.*
 import androidx.core.app.NotificationCompat
 import com.github.bhlangonijr.chesslib.*
-import com.github.bhlangonijr.chesslib.move.Move
 import kotlinx.coroutines.*
 import java.io.*
-import java.io.File
 import java.util.Locale
 import kotlin.math.*
 
@@ -25,8 +23,12 @@ class OverlayService : Service() {
     private lateinit var status: TextView
     private lateinit var eval: TextView
     private lateinit var engineText: TextView
+    private lateinit var logo: TextView
     private lateinit var lp: WindowManager.LayoutParams
-    private var flipped = false
+    private lateinit var logoLp: WindowManager.LayoutParams
+    private lateinit var colorButton: Button
+    private var blackAtBottom = false
+    private var scale = 1.0f
     private var ready = false
     private var busy = false
     private var proc: java.lang.Process? = null
@@ -45,6 +47,16 @@ class OverlayService : Service() {
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
             PixelFormat.TRANSLUCENT).apply { gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL; y = dp(58) }
         wm.addView(panel, lp)
+        logo = TextView(this).apply {
+            text = "♟"; textSize = 27f; gravity = Gravity.CENTER; setTextColor(0xFF63E477.toInt())
+            background = GradientDrawable().apply { shape=GradientDrawable.OVAL;setColor(0xF2222633.toInt());setStroke(dp(2),0xFF63E477.toInt()) }
+            elevation=dp(8).toFloat()
+            setOnClickListener { expandPanel() }
+            setOnTouchListener(LogoDrag())
+        }
+        logoLp = WindowManager.LayoutParams(dp(48),dp(48),WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+            PixelFormat.TRANSLUCENT).apply { gravity=Gravity.TOP or Gravity.START; x=dp(12); y=dp(180) }
         startEngine()
     }
 
@@ -53,12 +65,18 @@ class OverlayService : Service() {
             orientation = LinearLayout.VERTICAL; setPadding(dp(10),dp(8),dp(10),dp(10))
             background = GradientDrawable().apply { setColor(0xF2222633.toInt()); cornerRadius=dp(18).toFloat(); setStroke(dp(1),0xFF46536B.toInt()) }
         }
-        val header = LinearLayout(this).apply { gravity=Gravity.CENTER_VERTICAL; setOnTouchListener(Drag()) }
-        header.addView(label("♟  Chess Helper",19f,0xFF50DC69.toInt(),true),LinearLayout.LayoutParams(0,dp(38),1f))
-        header.addView(label("—",22f,Color.LTGRAY).apply { setPadding(dp(8),0,dp(8),0); setOnClickListener { panel.visibility=View.GONE } })
-        header.addView(label("×",24f,Color.LTGRAY).apply { setPadding(dp(8),0,dp(4),0); setOnClickListener { stopSelf() } })
+        val header = LinearLayout(this).apply { gravity=Gravity.CENTER_VERTICAL }
+        val dragTitle=label("♟  Chess Helper",19f,0xFF50DC69.toInt(),true)
+        header.addView(dragTitle,LinearLayout.LayoutParams(0,dp(38),1f))
+        dragTitle.setOnTouchListener(PanelDrag())
+        header.addView(label("−",25f,Color.LTGRAY).apply {
+            setPadding(dp(9),0,dp(9),0);setOnClickListener{collapsePanel()}
+        })
+        header.addView(label("×",24f,Color.LTGRAY).apply {
+            setPadding(dp(8),0,dp(4),0);setOnClickListener{stopSelf()}
+        })
         panel.addView(header)
-        status=label("Move pieces on this offline study board.",13f,Color.WHITE)
+        status=label("Make moves on this offline study board.",13f,Color.WHITE)
         panel.addView(status)
         boardView=StudyBoardView(this) {
             best=""; eval.text="EVAL   —"; engineText.text="ENGINE   Position changed"
@@ -67,27 +85,46 @@ class OverlayService : Service() {
         panel.addView(boardView,LinearLayout.LayoutParams(-1,dp(308)).apply { topMargin=dp(5); bottomMargin=dp(6) })
         val rows=LinearLayout(this).apply { orientation=LinearLayout.VERTICAL }
         fun row()=LinearLayout(this).apply { orientation=LinearLayout.HORIZONTAL; rows.addView(this) }
-        fun btn(r:LinearLayout,t:String,fn:(Button)->Unit) {
+        fun btn(r:LinearLayout,t:String,fn:(Button)->Unit):Button {
             val b=Button(this).apply { text=t; isAllCaps=false; textSize=11f; setTextColor(Color.WHITE)
                 background=GradientDrawable().apply { setColor(0xFF374154.toInt()); cornerRadius=dp(10).toFloat() }
                 setOnClickListener { fn(this) } }
-            r.addView(b,LinearLayout.LayoutParams(0,dp(46),1f).apply { setMargins(dp(2),dp(2),dp(2),dp(2)) })
+            r.addView(b,LinearLayout.LayoutParams(0,dp(44),1f).apply { setMargins(dp(2),dp(2),dp(2),dp(2)) })
+            return b
         }
         var r=row()
         btn(r,"Undo move"){boardView.undo();clear()}
         btn(r,"New game"){boardView.reset();clear()}
         r=row()
-        btn(r,"My pieces: White"){flipped=!flipped;boardView.flipped=flipped;boardView.invalidate();it.text=if(flipped)"My pieces: Black" else "My pieces: White"}
+        colorButton=btn(r,"My pieces: White"){blackAtBottom=!blackAtBottom;boardView.flipped=blackAtBottom;boardView.invalidate();it.text=if(blackAtBottom)"My pieces: Black" else "My pieces: White"}
         btn(r,"Think"){analyze()}
         r=row()
+        btn(r,"− Size"){changeScale(-0.1f)}
+        btn(r,"+ Size"){changeScale(0.1f)}
+        r=row()
         btn(r,"Best arrow: ON"){boardView.showArrow=!boardView.showArrow;boardView.bestMove=if(boardView.showArrow)best else "";boardView.invalidate();it.text=if(boardView.showArrow)"Best arrow: ON" else "Best arrow: OFF"}
-        btn(r,"Reset view"){lp.x=0;lp.y=dp(58);wm.updateViewLayout(panel,lp);flipped=false;boardView.flipped=false;boardView.invalidate()}
+        btn(r,"Reset view"){lp.x=0;lp.y=dp(58);wm.updateViewLayout(panel,lp);changeScale(0f)}
         panel.addView(rows)
         eval=label("EVAL   —",14f,0xFFB4E1CC.toInt());panel.addView(eval)
         engineText=label("ENGINE   Starting Stockfish…",12f,Color.WHITE);panel.addView(engineText)
-        panel.addView(label("Offline study panel • no screen reading",10f,Color.LTGRAY).apply{gravity=Gravity.CENTER})
+        panel.addView(label("Offline study board",10f,Color.LTGRAY).apply{gravity=Gravity.CENTER})
     }
 
+    private fun changeScale(delta:Float) {
+        scale=(if(delta==0f)1f else (scale+delta).coerceIn(.65f,1.25f))
+        lp.width=dp((330*scale).toInt())
+        boardView.layoutParams=boardView.layoutParams.apply { height=dp((308*scale).toInt()) }
+        panel.setPadding(dp((10*scale).toInt()),dp((8*scale).toInt()),dp((10*scale).toInt()),dp((10*scale).toInt()))
+        if(panel.isAttachedToWindow)wm.updateViewLayout(panel,lp)
+    }
+    private fun collapsePanel() {
+        if(panel.isAttachedToWindow)wm.removeView(panel)
+        if(!logo.isAttachedToWindow)wm.addView(logo,logoLp)
+    }
+    private fun expandPanel() {
+        if(logo.isAttachedToWindow)wm.removeView(logo)
+        if(!panel.isAttachedToWindow)wm.addView(panel,lp)
+    }
     private fun label(s:String,size:Float,color:Int,bold:Boolean=false)=TextView(this).apply {
         text=s;textSize=size;setTextColor(color);setPadding(dp(4),dp(4),dp(4),dp(4))
         if(bold)typeface=Typeface.DEFAULT_BOLD
@@ -130,18 +167,27 @@ class OverlayService : Service() {
                 }}
                 best=result.first;boardView.bestMove=if(boardView.showArrow)best else "";boardView.invalidate()
                 eval.text="EVAL   "+result.second;engineText.text="ENGINE   Best move: "+best.ifBlank{"none"}
-                status.text=if(best.isBlank()||best=="(none)")"No legal move." else "Analysis complete • arrow stays until position changes"
+                status.text=if(best.isBlank()||best=="(none)")"No legal move." else "Analysis complete • arrow remains visible"
             }catch(e:Exception){status.text="Analysis failed: "+(e.message?:"unknown")}
             finally{busy=false}
         }
     }
-    private inner class Drag:View.OnTouchListener{
+    private inner class PanelDrag:View.OnTouchListener{
         var sx=0f;var sy=0f;var ox=0;var oy=0
         override fun onTouch(v:View,e:MotionEvent):Boolean{
-            when(e.action){
-                MotionEvent.ACTION_DOWN->{sx=e.rawX;sy=e.rawY;ox=lp.x;oy=lp.y;return true}
-                MotionEvent.ACTION_MOVE->{lp.x=ox+(e.rawX-sx).toInt();lp.y=oy+(e.rawY-sy).toInt();runCatching{wm.updateViewLayout(panel,lp)};return true}
-            };return true
+            when(e.action){MotionEvent.ACTION_DOWN->{sx=e.rawX;sy=e.rawY;ox=lp.x;oy=lp.y;return true}
+                MotionEvent.ACTION_MOVE->{lp.x=ox+(e.rawX-sx).toInt();lp.y=oy+(e.rawY-sy).toInt();runCatching{wm.updateViewLayout(panel,lp)};return true}}
+            return false
+        }
+    }
+    private inner class LogoDrag:View.OnTouchListener{
+        var sx=0f;var sy=0f;var ox=0;var oy=0;var moved=false
+        override fun onTouch(v:View,e:MotionEvent):Boolean{
+            when(e.action){MotionEvent.ACTION_DOWN->{sx=e.rawX;sy=e.rawY;ox=logoLp.x;oy=logoLp.y;moved=false;return true}
+                MotionEvent.ACTION_MOVE->{if(abs(e.rawX-sx)>dp(6)||abs(e.rawY-sy)>dp(6))moved=true
+                    logoLp.x=ox+(e.rawX-sx).toInt();logoLp.y=oy+(e.rawY-sy).toInt();runCatching{wm.updateViewLayout(logo,logoLp)};return true}
+                MotionEvent.ACTION_UP->{if(!moved)expandPanel();return true}}
+            return true
         }
     }
     private fun notification():Notification{
@@ -154,6 +200,7 @@ class OverlayService : Service() {
     override fun onDestroy(){
         runCatching{writer?.write("quit\n");writer?.flush()};proc?.destroy()
         if(::panel.isInitialized&&panel.isAttachedToWindow)wm.removeView(panel)
+        if(::logo.isInitialized&&logo.isAttachedToWindow)wm.removeView(logo)
         scope.cancel();super.onDestroy()
     }
     override fun onBind(intent:Intent?)=null
@@ -165,8 +212,13 @@ private class StudyBoardView(context:android.content.Context,private val changed
     var flipped=false;var showArrow=true;var bestMove=""
     private var selected:Square?=null
     private var targets=emptySet<Square>()
-    private val light=0xFFEFE0C2.toInt();private val dark=0xFF78917D.toInt()
-    private val piecePaint=Paint(Paint.ANTI_ALIAS_FLAG).apply{textAlign=Paint.Align.CENTER;typeface=Typeface.create("serif",Typeface.NORMAL)}
+    private val light=0xFFEEF0D2.toInt();private val dark=0xFF789653.toInt()
+    private val glyphs=mapOf(
+        Piece.WHITE_KING to "♔",Piece.WHITE_QUEEN to "♕",Piece.WHITE_ROOK to "♖",Piece.WHITE_BISHOP to "♗",Piece.WHITE_KNIGHT to "♘",Piece.WHITE_PAWN to "♙",
+        Piece.BLACK_KING to "♚",Piece.BLACK_QUEEN to "♛",Piece.BLACK_ROOK to "♜",Piece.BLACK_BISHOP to "♝",Piece.BLACK_KNIGHT to "♞",Piece.BLACK_PAWN to "♟"
+    )
+    private val fill=Paint(Paint.ANTI_ALIAS_FLAG).apply{textAlign=Paint.Align.CENTER;typeface=Typeface.create("serif",Typeface.BOLD)}
+    private val outline=Paint(Paint.ANTI_ALIAS_FLAG).apply{textAlign=Paint.Align.CENTER;typeface=Typeface.create("serif",Typeface.BOLD);style=Paint.Style.STROKE;strokeJoin=Paint.Join.ROUND;strokeCap=Paint.Cap.ROUND}
     fun fen()=game.fen
     fun reset(){game.loadFromFen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1");history.clear();selected=null;targets=emptySet();bestMove="";invalidate();changed(game.fen)}
     fun undo(){if(history.isNotEmpty()){game.undoMove();history.removeAt(history.lastIndex);selected=null;targets=emptySet();bestMove="";invalidate();changed(game.fen)}}
@@ -179,13 +231,20 @@ private class StudyBoardView(context:android.content.Context,private val changed
             val pale=((f+r)and 1)==1;c.drawRect(rect,Paint().apply{color=if(pale)light else dark})
             if(sq==selected)c.drawRect(rect,Paint().apply{color=0x6675B7F2})
             val p=game.getPiece(sq)
-            if(p!=Piece.NONE){piecePaint.textSize=cell*.78f;piecePaint.color=if(p.pieceSide==Side.WHITE)Color.WHITE else 0xFF20242A.toInt()
-                piecePaint.setShadowLayer(2f,0f,1f,0x66000000);c.drawText(p.fanSymbol,rect.centerX(),rect.centerY()+cell*.27f,piecePaint);piecePaint.clearShadowLayer()}
+            if(p!=Piece.NONE){
+                val symbol=glyphs[p]?:p.fanSymbol
+                val base=cell*.83f;val y=rect.centerY()+base*.34f
+                outline.textSize=base;outline.strokeWidth=cell*.055f
+                fill.textSize=base
+                if(p.pieceSide==Side.WHITE){outline.color=0xFF70746D.toInt();fill.color=0xFFFFFEF7.toInt()}
+                else{outline.color=0xFF22251F.toInt();fill.color=0xFF4B4D50.toInt()}
+                c.drawText(symbol,rect.centerX(),y,outline);c.drawText(symbol,rect.centerX(),y,fill)
+            }
             if(targets.contains(sq)){val mark=Paint(Paint.ANTI_ALIAS_FLAG).apply{color=0x88302D26.toInt();style=if(p==Piece.NONE)Paint.Style.FILL else Paint.Style.STROKE;strokeWidth=cell*.07f}
                 c.drawCircle(rect.centerX(),rect.centerY(),if(p==Piece.NONE)cell*.12f else cell*.43f,mark)}
-            val coord=Paint(Paint.ANTI_ALIAS_FLAG).apply{color=if(pale)dark else light;textSize=cell*.16f}
-            if(f==0)c.drawText(r.toString(),rect.left+cell*.1f,rect.top+cell*.18f,coord)
-            if(r==1)c.drawText(('a'+f).toString(),rect.right-cell*.12f,rect.bottom-cell*.04f,coord)
+            val coord=Paint(Paint.ANTI_ALIAS_FLAG).apply{color=if(pale)dark else light;textSize=cell*.15f;typeface=Typeface.DEFAULT_BOLD}
+            if(vx==0)c.drawText(r.toString(),rect.left+cell*.12f,rect.top+cell*.18f,coord)
+            if(vy==7)c.drawText(('a'+f).toString(),rect.right-cell*.12f,rect.bottom-cell*.04f,coord)
         }
         if(showArrow&&bestMove.length>=4)drawArrow(c,l,t,cell)
     }
