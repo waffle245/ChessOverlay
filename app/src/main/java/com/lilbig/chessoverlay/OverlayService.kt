@@ -27,8 +27,10 @@ class OverlayService : Service() {
     private lateinit var lp: WindowManager.LayoutParams
     private lateinit var logoLp: WindowManager.LayoutParams
     private lateinit var colorButton: Button
+    private lateinit var thinkButton: Button
     private lateinit var controlsLayout: LinearLayout
     private var autoThink = false
+    private var mirrorOnly = false
     private var boardOnly = false
     private var blackAtBottom = false
     private var scale = 0.78f
@@ -84,8 +86,8 @@ class OverlayService : Service() {
         panel.addView(status)
         boardView=StudyBoardView(this) {
             best=""; eval.text="EVAL   —"; engineText.text="ENGINE   Position changed"
-            status.text="Position updated • Tap THINK to analyze"
-            if(autoThink && boardView.sideToMove()==playerSide()) analyze()
+            status.text=if(mirrorOnly) "Mirror only • reproduce the Chess.com move here" else "Position updated • Tap THINK to analyze"
+            if(!mirrorOnly && autoThink && boardView.sideToMove()==playerSide()) analyze()
         }
         panel.addView(boardView,LinearLayout.LayoutParams(-1,dp((280*scale).toInt())).apply { topMargin=dp(4); bottomMargin=dp(5) })
         val rows=LinearLayout(this).apply { orientation=LinearLayout.VERTICAL }
@@ -103,7 +105,24 @@ class OverlayService : Service() {
         btn(r,"New game"){boardView.reset();clear()}
         r=row()
         colorButton=btn(r,"My pieces: White"){blackAtBottom=!blackAtBottom;boardView.flipped=blackAtBottom;boardView.invalidate();it.text=if(blackAtBottom)"My pieces: Black" else "My pieces: White"}
-        btn(r,"Think"){analyze()}
+        thinkButton=btn(r,"Think"){analyze()}
+        r=row()
+        btn(r,"Mirror only: OFF"){ b ->
+            mirrorOnly=!mirrorOnly
+            if(mirrorOnly){
+                autoThink=false
+                thinkButton.isEnabled=false
+                thinkButton.alpha=0.45f
+                status.text="Mirror only ON • Stockfish and Auto Think are locked"
+                engineText.text="ENGINE   Disabled during mirror mode"
+            }else{
+                thinkButton.isEnabled=true
+                thinkButton.alpha=1f
+                status.text="Offline study mode • engine available"
+                engineText.text=if(ready) "ENGINE   Stockfish ready" else "ENGINE   Starting Stockfish…"
+            }
+            b.text=if(mirrorOnly) "Mirror only: ON" else "Mirror only: OFF"
+        }
         r=row()
         val sizeLabel=label("Board size",11f,Color.LTGRAY)
         r.addView(sizeLabel,LinearLayout.LayoutParams(dp(72),dp(42)))
@@ -117,7 +136,7 @@ class OverlayService : Service() {
         }
         r.addView(sizeSlider,LinearLayout.LayoutParams(0,dp(42),1f))
         r=row()
-        btn(r,"Auto think: OFF"){autoThink=!autoThink;it.text=if(autoThink)"Auto think: ON" else "Auto think: OFF";status.text=if(autoThink)"Auto-think enabled for your turns on this study board" else "Auto-think disabled"}
+        btn(r,"Auto think: OFF"){ if(mirrorOnly){status.text="Auto Think is unavailable in Mirror Only mode"}else{autoThink=!autoThink;it.text=if(autoThink)"Auto think: ON" else "Auto think: OFF";status.text=if(autoThink)"Auto-think enabled for your turns on this study board" else "Auto-think disabled"} }
         btn(r,"Board only"){setBoardOnly(!boardOnly)}
         r=row()
         btn(r,"Best arrow: ON"){boardView.showArrow=!boardView.showArrow;boardView.bestMove=if(boardView.showArrow)best else "";boardView.invalidate();it.text=if(boardView.showArrow)"Best arrow: ON" else "Best arrow: OFF"}
@@ -174,6 +193,7 @@ class OverlayService : Service() {
         }catch(e:Exception){engineText.text="ENGINE   "+(e.message?: "Failed to start")}
     }}
     private fun analyze(){
+        if(mirrorOnly){status.text="Mirror Only is active • engine analysis is disabled";return}
         if(!ready){status.text="Stockfish is still starting…";return};if(busy)return
         busy=true;status.text="Analyzing study position…";val fen=boardView.fen()
         scope.launch{
