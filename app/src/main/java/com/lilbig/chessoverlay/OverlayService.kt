@@ -29,7 +29,7 @@ class OverlayService : Service() {
     private var flipped = false
     private var ready = false
     private var busy = false
-    private var proc: Process? = null
+    private var proc: java.lang.Process? = null
     private var reader: BufferedReader? = null
     private var writer: BufferedWriter? = null
     private var best = ""
