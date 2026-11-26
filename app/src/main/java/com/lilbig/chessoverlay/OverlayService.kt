@@ -112,7 +112,7 @@ class OverlayService : Service() {
         r.addView(sizeSlider,LinearLayout.LayoutParams(0,dp(42),1f))
         r=row()
         btn(r,"Best arrow: ON"){boardView.showArrow=!boardView.showArrow;boardView.bestMove=if(boardView.showArrow)best else "";boardView.invalidate();it.text=if(boardView.showArrow)"Best arrow: ON" else "Best arrow: OFF"}
-        btn(r,"Reset view"){lp.x=0;lp.y=dp(58);wm.updateViewLayout(panel,lp);changeScale(0f)}
+        btn(r,"Reset view"){lp.x=0;lp.y=dp(58);wm.updateViewLayout(panel,lp);changeScale(.78f)}
         panel.addView(rows)
         eval=label("EVAL   —",14f,0xFFB4E1CC.toInt());panel.addView(eval)
         engineText=label("ENGINE   Starting Stockfish…",12f,Color.WHITE);panel.addView(engineText)
