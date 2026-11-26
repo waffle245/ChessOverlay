@@ -35,7 +35,7 @@ class OverlayService : Service() {
     private var reader: BufferedReader? = null
     private var writer: BufferedWriter? = null
     private var best = ""
-    private val sf by lazy { File(applicationInfo.nativeLibraryDir, "libstockfish.so") }
+    private val sf: java.io.File by lazy { java.io.File(applicationInfo.nativeLibraryDir, "libstockfish.so") }
 
     override fun onCreate() {
         super.onCreate()
